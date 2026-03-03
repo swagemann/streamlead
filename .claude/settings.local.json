@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find /c/streamlead -type f -name \"*.py\" -exec wc -l {} ;)",
+      "Bash(wc -l /c/streamlead/*.py)",
+      "Bash(grep -h \"^import\\\\|^from\" /c/streamlead/*.py)",
+      "WebFetch(domain:github.com)"
+    ]
+  }
+}
