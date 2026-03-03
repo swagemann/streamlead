@@ -2,7 +2,8 @@
 import re
 import pandas as pd
 from azure.devops.connection import Connection
-from msrest.authentication import BasicAuthentication
+from azure.identity import InteractiveBrowserCredential
+from msrest.authentication import BasicTokenAuthentication
 from azure.devops.v7_0.work_item_tracking.models import Wiql
 
 FIELDS = [
@@ -20,9 +21,17 @@ FIELDS = [
 BATCH_SIZE = 200
 FTCASE_PATTERN = re.compile(r"FTCASE#\d+#")
 
+ADO_SCOPE = "499b84ac-1321-427f-aa17-267ca6975798/.default"
 
-def get_ado_connection(org_url, pat):
-    credentials = BasicAuthentication("", pat)
+
+def get_credential():
+    """Create an interactive browser credential for Azure AD login."""
+    return InteractiveBrowserCredential()
+
+
+def get_ado_connection(org_url, token):
+    """Create Azure DevOps connection using a bearer token."""
+    credentials = BasicTokenAuthentication({"access_token": token})
     return Connection(base_url=org_url, creds=credentials)
 
 

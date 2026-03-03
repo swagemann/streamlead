@@ -2,18 +2,36 @@
 import streamlit as st
 import plotly.express as px
 import pandas as pd
-from ado_client import get_ado_connection, fetch_work_items
+from ado_client import get_credential, get_ado_connection, fetch_work_items, ADO_SCOPE
 from teams import load_teams, save_teams, add_member, remove_member
 
 st.set_page_config(page_title="ADO Dashboard", layout="wide")
 st.title("Azure DevOps Ticket Dashboard")
 
+# --- Session state for auth ---
+if "credential" not in st.session_state:
+    st.session_state.credential = None
+
 # --- Sidebar: Config & Filters ---
 with st.sidebar:
     st.header("🔧 Configuration")
     org_url = st.text_input("Org URL", value="https://dev.azure.com/YOUR_ORG")
-    pat = st.text_input("PAT", type="password")
     project = st.text_input("Project", value="YOUR_PROJECT")
+
+    if st.session_state.credential is None:
+        if st.button("Sign In with Microsoft"):
+            try:
+                cred = get_credential()
+                cred.get_token(ADO_SCOPE)  # triggers browser login
+                st.session_state.credential = cred
+                st.rerun()
+            except Exception as e:
+                st.error(f"Authentication failed: {e}")
+    else:
+        st.success("Signed in")
+        if st.button("Sign Out"):
+            st.session_state.credential = None
+            st.rerun()
 
     st.divider()
     st.header("📅 Timeframe")
@@ -27,8 +45,8 @@ with st.sidebar:
 
 # --- Data Fetch (cached) ---
 @st.cache_data(ttl=300)
-def load_data(org_url, pat, project, start_date, end_date):
-    conn = get_ado_connection(org_url, pat)
+def load_data(org_url, token, project, start_date, end_date):
+    conn = get_ado_connection(org_url, token)
     wiql = f"""
         SELECT [System.Id] FROM WorkItems
         WHERE [System.TeamProject] = '{project}'
@@ -38,8 +56,9 @@ def load_data(org_url, pat, project, start_date, end_date):
     """
     return fetch_work_items(conn, project, wiql)
 
-if pat and project:
-    df = load_data(org_url, pat, project, str(date_range[0]), str(date_range[1]))
+if st.session_state.credential and project:
+    token = st.session_state.credential.get_token(ADO_SCOPE).token
+    df = load_data(org_url, token, project, str(date_range[0]), str(date_range[1]))
     teams = load_teams()
 
     # Derive tags_list after cache to avoid serialization issues
@@ -201,4 +220,4 @@ if pat and project:
                     st.rerun()
 
 else:
-    st.info("Enter your ADO org URL, PAT, and project name in the sidebar to get started.")
+    st.info("Sign in with your Microsoft account and enter your project name in the sidebar to get started.")
