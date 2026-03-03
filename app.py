@@ -15,8 +15,8 @@ if "credential" not in st.session_state:
 # --- Sidebar: Config & Filters ---
 with st.sidebar:
     st.header("🔧 Configuration")
-    org_url = st.text_input("Org URL", value="https://dev.azure.com/YOUR_ORG")
-    project = st.text_input("Project", value="YOUR_PROJECT")
+    org_url = st.text_input("Org URL", value="https://dev.azure.com/HOLMAN")
+    project = st.text_input("Project", value="IT")
 
     if st.session_state.credential is None:
         if st.button("Sign In with Microsoft"):

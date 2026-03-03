@@ -5,6 +5,7 @@ from azure.devops.connection import Connection
 from azure.identity import InteractiveBrowserCredential
 from msrest.authentication import BasicTokenAuthentication
 from azure.devops.v7_0.work_item_tracking.models import Wiql
+from azure.devops.v7_0.work_item_tracking.models import TeamContext
 
 FIELDS = [
     "System.Id",
@@ -37,7 +38,8 @@ def get_ado_connection(org_url, token):
 
 def fetch_work_items(connection, project, wiql_query):
     client = connection.clients.get_work_item_tracking_client()
-    result = client.query_by_wiql(Wiql(query=wiql_query), project=project)
+    team_context = TeamContext(project=project)
+    result = client.query_by_wiql(Wiql(query=wiql_query), team_context=team_context)
 
     ids = [ref.id for ref in result.work_items]
     if not ids:
