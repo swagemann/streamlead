@@ -7,7 +7,8 @@
       "WebFetch(domain:github.com)",
       "Bash(grep -h \"^import\\\\|^from\" *.py)",
       "Bash(unzip -l streamlead_zip.zip)",
-      "Bash(pip install azure-identity)"
+      "Bash(pip install azure-identity)",
+      "Bash(unzip -l /c/streamlead/streamlead_zip.zip)"
     ]
   }
 }

@@ -34,6 +34,20 @@ with st.sidebar:
             st.rerun()
 
     st.divider()
+    st.header("📂 Area Paths")
+    area_paths = st.multiselect(
+        "Query Area Paths",
+        options=[
+            "Information Management - BI Dev",
+            "Information Management - dbt",
+        ],
+        default=[
+            "Information Management - BI Dev",
+            "Information Management - dbt",
+        ],
+    )
+
+    st.divider()
     st.header("📅 Timeframe")
     date_range = st.date_input("Date Range", value=[
         pd.Timestamp.now() - pd.Timedelta(days=90),
@@ -45,20 +59,24 @@ with st.sidebar:
 
 # --- Data Fetch (cached) ---
 @st.cache_data(ttl=300)
-def load_data(org_url, token, project, start_date, end_date):
+def load_data(org_url, token, project, start_date, end_date, area_paths):
     conn = get_ado_connection(org_url, token)
+    area_clause = " OR ".join(
+        f"[System.AreaPath] UNDER '{project}\\{ap}'" for ap in area_paths
+    )
     wiql = f"""
         SELECT [System.Id] FROM WorkItems
         WHERE [System.TeamProject] = '{project}'
+        AND ({area_clause})
         AND [System.CreatedDate] >= '{start_date}'
         AND [System.CreatedDate] <= '{end_date}'
         ORDER BY [System.CreatedDate] DESC
     """
     return fetch_work_items(conn, project, wiql)
 
-if st.session_state.credential and project:
+if st.session_state.credential and project and area_paths:
     token = st.session_state.credential.get_token(ADO_SCOPE).token
-    df = load_data(org_url, token, project, str(date_range[0]), str(date_range[1]))
+    df = load_data(org_url, token, project, str(date_range[0]), str(date_range[1]), tuple(area_paths))
     teams = load_teams()
 
     # Derive tags_list after cache to avoid serialization issues
@@ -220,4 +238,4 @@ if st.session_state.credential and project:
                     st.rerun()
 
 else:
-    st.info("Sign in with your Microsoft account and enter your project name in the sidebar to get started.")
+    st.info("Sign in with your Microsoft account, enter your project name, and select at least one area path in the sidebar to get started.")
