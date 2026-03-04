@@ -12,8 +12,8 @@ st.title("Data Modeling Management Dashboard")
 AREA_PATHS = [
     "Information Management\\BI Dev",
     "Information Management\\dbt",
-    "Information Management\\BI Outbound",
-    "Information Management\\Business Intelligence",
+    # "Information Management\\BI Outbound",
+    # "Information Management\\Business Intelligence",
 ]
 
 # --- Session state for auth ---
@@ -87,7 +87,7 @@ if st.session_state.credential and project:
     df["team"] = df["assigned_to"].map(member_to_team).fillna("Unassigned")
 
     # Compute ticket age
-    now = pd.Timestamp.now()
+    now = pd.Timestamp.now(tz="UTC")
     df["age_days"] = (now - df["created_date"]).dt.days
 
     # Sidebar filters (dynamic)
