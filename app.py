@@ -6,7 +6,15 @@ from ado_client import get_credential, get_ado_connection, fetch_work_items, ADO
 from teams import load_teams, save_teams, add_member, remove_member
 
 st.set_page_config(page_title="ADO Dashboard", layout="wide")
-st.title("Azure DevOps Ticket Dashboard")
+st.title("Data Modeling Management Dashboard")
+
+# --- Hardcoded Area Paths ---
+AREA_PATHS = [
+    "Information Management\\BI Dev",
+    "Information Management\\dbt",
+    "Information Management\\BI Outbound",
+    "Information Management\\Business Intelligence",
+]
 
 # --- Session state for auth ---
 if "credential" not in st.session_state:
@@ -14,7 +22,7 @@ if "credential" not in st.session_state:
 
 # --- Sidebar: Config & Filters ---
 with st.sidebar:
-    st.header("🔧 Configuration")
+    st.header("Configuration")
     org_url = st.text_input("Org URL", value="https://dev.azure.com/HOLMAN")
     project = st.text_input("Project", value="IT")
 
@@ -22,7 +30,7 @@ with st.sidebar:
         if st.button("Sign In with Microsoft"):
             try:
                 cred = get_credential()
-                cred.get_token(ADO_SCOPE)  # triggers browser login
+                cred.get_token(ADO_SCOPE)
                 st.session_state.credential = cred
                 st.rerun()
             except Exception as e:
@@ -34,28 +42,14 @@ with st.sidebar:
             st.rerun()
 
     st.divider()
-    st.header("📂 Area Paths")
-    area_paths = st.multiselect(
-        "Query Area Paths",
-        options=[
-            "Information Management - BI Dev",
-            "Information Management - dbt",
-        ],
-        default=[
-            "Information Management - BI Dev",
-            "Information Management - dbt",
-        ],
-    )
-
-    st.divider()
-    st.header("📅 Timeframe")
+    st.header("Timeframe")
     date_range = st.date_input("Date Range", value=[
-        pd.Timestamp.now() - pd.Timedelta(days=90),
+        pd.Timestamp.now() - pd.Timedelta(days=180),
         pd.Timestamp.now()
     ])
 
     st.divider()
-    st.header("🔍 Filters")
+    st.header("Filters")
 
 # --- Data Fetch (cached) ---
 @st.cache_data(ttl=300)
@@ -74,12 +68,13 @@ def load_data(org_url, token, project, start_date, end_date, area_paths):
     """
     return fetch_work_items(conn, project, wiql)
 
-if st.session_state.credential and project and area_paths:
+
+if st.session_state.credential and project:
     token = st.session_state.credential.get_token(ADO_SCOPE).token
-    df = load_data(org_url, token, project, str(date_range[0]), str(date_range[1]), tuple(area_paths))
+    df = load_data(org_url, token, project, str(date_range[0]), str(date_range[1]), tuple(AREA_PATHS))
     teams = load_teams()
 
-    # Derive tags_list after cache to avoid serialization issues
+    # Derive tags_list
     df["tags_list"] = df["tags"].apply(
         lambda t: [x.strip() for x in t.split(";") if x.strip()] if t else []
     )
@@ -91,12 +86,15 @@ if st.session_state.credential and project and area_paths:
             member_to_team[m] = team
     df["team"] = df["assigned_to"].map(member_to_team).fillna("Unassigned")
 
+    # Compute ticket age
+    now = pd.Timestamp.now()
+    df["age_days"] = (now - df["created_date"]).dt.days
+
     # Sidebar filters (dynamic)
     with st.sidebar:
-        status_filter = st.multiselect("Status", df["state"].unique(), default=df["state"].unique())
-        team_filter = st.multiselect("Team", df["team"].unique(), default=df["team"].unique())
-        type_filter = st.multiselect("Work Item Type", df["type"].unique(), default=df["type"].unique())
-        area_filter = st.multiselect("Area Path", df["area_path"].unique(), default=df["area_path"].unique())
+        status_filter = st.multiselect("Status", df["state"].unique(), default=list(df["state"].unique()))
+        team_filter = st.multiselect("Team", df["team"].unique(), default=list(df["team"].unique()))
+        type_filter = st.multiselect("Work Item Type", df["type"].unique(), default=list(df["type"].unique()))
 
         all_tags = sorted(set(tag for tags in df["tags_list"] for tag in tags))
         tag_filter = st.multiselect("Tags", all_tags, default=[])
@@ -105,8 +103,7 @@ if st.session_state.credential and project and area_paths:
     filtered = df[
         (df["state"].isin(status_filter)) &
         (df["team"].isin(team_filter)) &
-        (df["type"].isin(type_filter)) &
-        (df["area_path"].isin(area_filter))
+        (df["type"].isin(type_filter))
     ]
     if tag_filter:
         filtered = filtered[
@@ -114,54 +111,40 @@ if st.session_state.credential and project and area_paths:
         ]
 
     # --- KPI Row ---
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Total Tickets", len(filtered))
-    c2.metric("Open", len(filtered[filtered["state"].isin(["New", "Active"])]))
-    c3.metric("Closed", len(filtered[filtered["closed_date"].notna()]))
-    avg_days = filtered.dropna(subset=["closed_date"]).apply(
+    closed_items = filtered.dropna(subset=["closed_date"])
+    days_to_close = closed_items.apply(
         lambda r: (r["closed_date"] - r["created_date"]).days, axis=1
-    ).mean()
-    c4.metric("Avg Days to Close", round(avg_days, 1) if pd.notna(avg_days) else "N/A")
-    c5.metric("Fleet Track", len(filtered[
-        filtered["tags_list"].apply(lambda t: "Fleet Track" in t)
-    ]))
+    )
+    median_days = days_to_close.median() if len(days_to_close) > 0 else None
 
-    # --- Charts Row ---
-    col1, col2 = st.columns(2)
+    def count_area(keyword):
+        return len(filtered[filtered["area_path"].str.contains(keyword, case=False, na=False)])
 
-    with col1:
-        st.subheader("Tickets Over Time (Created vs Closed)")
-        created_ts = (filtered.set_index("created_date")
-                      .resample("W").size().reset_index(name="created"))
-        closed_ts = (filtered.dropna(subset=["closed_date"])
-                     .set_index("closed_date")
-                     .resample("W").size().reset_index(name="closed"))
-        ts = created_ts.merge(closed_ts, left_on="created_date",
-                              right_on="closed_date", how="outer").fillna(0)
-        ts["date"] = ts["created_date"].combine_first(ts["closed_date"])
-        fig = px.line(ts, x="date", y=["created", "closed"],
-                      labels={"value": "Count", "date": "Week"})
-        st.plotly_chart(fig, use_container_width=True)
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Median Days to Close", round(median_days, 1) if pd.notna(median_days) else "N/A")
+    c2.metric("dbt", count_area("dbt"))
+    c3.metric("BI Dev", count_area("BI Dev"))
+    c4.metric("IM-BI Outbound", count_area("BI Outbound"))
+    c5.metric("IM Business Intelligence", count_area("Business Intelligence"))
 
-    with col2:
-        st.subheader("Tickets by Category")
-        fig2 = px.pie(filtered, names="type", hole=0.4)
-        st.plotly_chart(fig2, use_container_width=True)
+    # --- Tickets Over Time (Bar Chart, full width) ---
+    st.subheader("Tickets Over Time (Created vs Closed)")
+    created_ts = (filtered.set_index("created_date")
+                  .resample("W").size().reset_index(name="created"))
+    closed_ts = (filtered.dropna(subset=["closed_date"])
+                 .set_index("closed_date")
+                 .resample("W").size().reset_index(name="closed"))
+    ts = created_ts.merge(closed_ts, left_on="created_date",
+                          right_on="closed_date", how="outer").fillna(0)
+    ts["date"] = ts["created_date"].combine_first(ts["closed_date"])
+    ts_melted = ts.melt(id_vars=["date"], value_vars=["created", "closed"],
+                        var_name="series", value_name="count")
+    fig = px.bar(ts_melted, x="date", y="count", color="series", barmode="group",
+                 labels={"count": "Count", "date": "Week", "series": ""})
+    fig.update_layout(xaxis_title="Week", yaxis_title="Count")
+    st.plotly_chart(fig, use_container_width=True)
 
-    # --- By Team Bar Chart ---
-    st.subheader("Tickets by Team & Status")
-    team_status = filtered.groupby(["team", "state"]).size().reset_index(name="count")
-    fig3 = px.bar(team_status, x="team", y="count", color="state", barmode="stack")
-    st.plotly_chart(fig3, use_container_width=True)
-
-    # --- By Area Path Bar Chart ---
-    st.subheader("Tickets by Area Path")
-    area_counts = filtered.groupby("area_path").size().reset_index(name="count")
-    fig_area = px.bar(area_counts, x="area_path", y="count", color="area_path", text_auto=True)
-    fig_area.update_layout(showlegend=False)
-    st.plotly_chart(fig_area, use_container_width=True)
-
-    # --- By Tag Bar Chart ---
+    # --- Tickets by Tag ---
     st.subheader("Tickets by Tag")
     tag_df = filtered.explode("tags_list")
     tag_df = tag_df[tag_df["tags_list"].astype(bool)]
@@ -174,41 +157,109 @@ if st.session_state.credential and project and area_paths:
     else:
         st.info("No tagged items in the current filter.")
 
-    # --- Kanban Board ---
+    # --- Team Summary Table ---
     st.divider()
-    st.subheader("Kanban Board")
+    st.subheader("Team Summary")
 
-    state_order = ["New", "Active", "Resolved", "Closed"]
-    active_states = [s for s in state_order if s in filtered["state"].unique()]
-    for s in filtered["state"].unique():
-        if s not in active_states:
-            active_states.append(s)
+    team_names = sorted(filtered["team"].unique())
+    team_rows = []
 
-    MAX_CARDS = 20
-    kanban_cols = st.columns(len(active_states)) if active_states else []
+    # States mapping
+    new_states = ["New", "Created"]
+    evaluate_states = ["Evaluate"]
+    active_group_states = ["Approved", "Active", "In Progress"]
+    complete_states = ["Closed", "Resolved", "Done", "Complete"]
+    blocked_states = ["Blocked"]
 
-    for col, state_name in zip(kanban_cols, active_states):
-        with col:
-            state_items = filtered[filtered["state"] == state_name]
-            st.markdown(f"**{state_name}**")
-            st.caption(f"{len(state_items)} items")
+    for t in team_names:
+        t_df = filtered[filtered["team"] == t]
 
-            for _, row in state_items.head(MAX_CARDS).iterrows():
-                with st.expander(f"#{row['id']} - {row['type']}"):
-                    st.write(f"**{row.get('title', 'No title')}**")
-                    st.write(f"Assigned: {row['assigned_to'] or 'Unassigned'}")
-                    st.write(f"Area: {row['area_path']}")
-                    if row["tags_list"]:
-                        st.write(f"Tags: {', '.join(row['tags_list'])}")
-                    created = row["created_date"]
-                    st.write(f"Created: {created.strftime('%Y-%m-%d') if pd.notna(created) else 'N/A'}")
+        t_closed = t_df[t_df["state"].isin(complete_states)]
+        t_days = t_closed.apply(
+            lambda r: (r["closed_date"] - r["created_date"]).days if pd.notna(r["closed_date"]) else None, axis=1
+        ).dropna()
 
-            if len(state_items) > MAX_CARDS:
-                st.info(f"Showing {MAX_CARDS} of {len(state_items)} items")
+        # Open tickets age
+        t_open = t_df[~t_df["state"].isin(complete_states)]
+        older_week = len(t_open[t_open["age_days"] > 7])
+        older_month = len(t_open[t_open["age_days"] > 30])
+
+        avg_comments = t_df["comment_count"].mean() if "comment_count" in t_df.columns and t_df["comment_count"].notna().any() else None
+
+        team_rows.append({
+            "Team": t,
+            "Created": int(len(t_df[t_df["state"].isin(new_states)])),
+            "Evaluate": int(len(t_df[t_df["state"].isin(evaluate_states)])),
+            "Approved/Active/In Progress": int(len(t_df[t_df["state"].isin(active_group_states)])),
+            "Complete": int(len(t_closed)),
+            "Blocked": int(len(t_df[t_df["state"].isin(blocked_states)])),
+            "Avg Days to Complete": round(t_days.mean(), 1) if len(t_days) > 0 else "N/A",
+            "Avg Comments/Ticket": round(avg_comments, 1) if pd.notna(avg_comments) else "N/A",
+            "Older Than Week": int(older_week),
+            "Older Than Month": int(older_month),
+        })
+
+    team_summary_df = pd.DataFrame(team_rows)
+
+    def highlight_old_columns(row):
+        styles = [""] * len(row)
+        cols = list(row.index)
+        week_idx = cols.index("Older Than Week") if "Older Than Week" in cols else -1
+        month_idx = cols.index("Older Than Month") if "Older Than Month" in cols else -1
+        if month_idx >= 0 and row["Older Than Month"] > 0:
+            styles[month_idx] = "background-color: #ffcccc; color: #8b0000"
+        if week_idx >= 0 and row["Older Than Week"] > 0:
+            styles[week_idx] = "background-color: #ffffcc; color: #8b8000"
+        return styles
+
+    styled_summary = team_summary_df.style.apply(highlight_old_columns, axis=1)
+    st.dataframe(styled_summary, use_container_width=True, hide_index=True)
+
+    # --- Team Ticket Details (replaces Kanban) ---
+    st.divider()
+    st.subheader("Team Ticket Details")
+
+    selected_team = st.selectbox("Select Team", ["All"] + team_names)
+
+    if selected_team == "All":
+        detail_df = filtered
+    else:
+        detail_df = filtered[filtered["team"] == selected_team]
+
+    # Status ordering
+    state_order = ["New", "Created", "Evaluate", "Approved", "Active", "In Progress", "Blocked", "Resolved", "Closed", "Done", "Complete"]
+    active_states_in_data = [s for s in state_order if s in detail_df["state"].unique()]
+    for s in detail_df["state"].unique():
+        if s not in active_states_in_data:
+            active_states_in_data.append(s)
+
+    def highlight_old_tickets(row):
+        age = row.get("Age (Days)", 0)
+        if pd.notna(age) and age > 30:
+            return ["background-color: #ffcccc"] * len(row)
+        elif pd.notna(age) and age > 7:
+            return ["background-color: #ffffcc"] * len(row)
+        return [""] * len(row)
+
+    for state_name in active_states_in_data:
+        state_items = detail_df[detail_df["state"] == state_name]
+        if state_items.empty:
+            continue
+
+        st.markdown(f"### {state_name} ({len(state_items)})")
+
+        display_df = state_items[["id", "title", "assigned_to", "type", "area_path", "created_date", "age_days", "comment_count", "tags"]].copy()
+        display_df.columns = ["ID", "Title", "Assigned To", "Type", "Area Path", "Created", "Age (Days)", "Comments", "Tags"]
+        display_df["Created"] = display_df["Created"].dt.strftime("%Y-%m-%d")
+
+        styled = display_df.style.apply(highlight_old_tickets, axis=1)
+        st.dataframe(styled, use_container_width=True, hide_index=True)
+
+        st.divider()
 
     # --- Team Management ---
     st.divider()
-    st.subheader("👥 Team Management")
+    st.subheader("Team Management")
 
     tab1, tab2 = st.tabs(["View Teams", "Edit Teams"])
 
@@ -216,14 +267,13 @@ if st.session_state.credential and project and area_paths:
         for team, members in teams.items():
             with st.expander(f"{team} ({len(members)} members)"):
                 for m in members:
-                    st.write(f"• {m}")
+                    st.write(f"- {m}")
 
     with tab2:
         col_a, col_b = st.columns(2)
         with col_a:
             st.write("**Add Member**")
             team_name = st.text_input("Team Name")
-            # Dropdown from ADO users seen in data
             member = st.selectbox("Member", df["assigned_to"].dropna().unique())
             if st.button("Add"):
                 add_member(team_name, member, teams)
@@ -238,4 +288,4 @@ if st.session_state.credential and project and area_paths:
                     st.rerun()
 
 else:
-    st.info("Sign in with your Microsoft account, enter your project name, and select at least one area path in the sidebar to get started.")
+    st.info("Sign in with your Microsoft account and enter your project name in the sidebar to get started.")

@@ -17,6 +17,7 @@ FIELDS = [
     "System.AreaPath",
     "System.Title",
     "System.Tags",
+    "System.CommentCount",
 ]
 
 BATCH_SIZE = 200
@@ -47,7 +48,7 @@ def fetch_work_items(connection, project, wiql_query):
             columns=[
                 "id", "state", "assigned_to", "type",
                 "created_date", "closed_date",
-                "area_path", "title", "tags",
+                "area_path", "title", "tags", "comment_count",
             ]
         )
 
@@ -85,6 +86,7 @@ def fetch_work_items(connection, project, wiql_query):
                 "area_path": f.get("System.AreaPath", ""),
                 "title": title,
                 "tags": raw_tags,
+                "comment_count": f.get("System.CommentCount", 0) or 0,
             }
         )
 
