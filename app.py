@@ -120,12 +120,21 @@ if st.session_state.credential and project:
     def count_area(keyword):
         return len(filtered[filtered["area_path"].str.contains(keyword, case=False, na=False)])
 
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Median Days to Close", round(median_days, 1) if pd.notna(median_days) else "N/A")
-    c2.metric("dbt", count_area("dbt"))
-    c3.metric("BI Dev", count_area("BI Dev"))
-    c4.metric("IM-BI Outbound", count_area("BI Outbound"))
-    c5.metric("IM Business Intelligence", count_area("Business Intelligence"))
+    total_tickets = len(filtered)
+    active_tickets = len(filtered[filtered["state"].isin(["Approved", "Active", "In Progress", "New", "Created", "Evaluate"])])
+    closed_tickets = len(closed_items)
+    fleet_track_tickets = len(filtered[filtered["tags_list"].apply(lambda t: "Fleet Track" in t)])
+
+    c1, c2, c3, c4, c5, c6, c7, c8, c9 = st.columns(9)
+    c1.metric("Total", total_tickets)
+    c2.metric("Active", active_tickets)
+    c3.metric("Closed", closed_tickets)
+    c4.metric("FleetTrack", fleet_track_tickets)
+    c5.metric("Median Days to Close", round(median_days, 1) if pd.notna(median_days) else "N/A")
+    c6.metric("dbt", count_area("dbt"))
+    c7.metric("BI Dev", count_area("BI Dev"))
+    c8.metric("IM-BI Outbound", count_area("BI Outbound"))
+    c9.metric("IM Business Intelligence", count_area("Business Intelligence"))
 
     # --- Tickets Over Time (Bar Chart, full width) ---
     st.subheader("Tickets Over Time (Created vs Closed)")
@@ -139,29 +148,46 @@ if st.session_state.credential and project:
     ts["date"] = ts["created_date"].combine_first(ts["closed_date"])
     ts_melted = ts.melt(id_vars=["date"], value_vars=["created", "closed"],
                         var_name="series", value_name="count")
-    fig = px.bar(ts_melted, x="date", y="count", color="series", barmode="group",
+    fig = px.bar(ts_melted, x="date", y="count", color="series", barmode="stack",
                  labels={"count": "Count", "date": "Week", "series": ""})
     fig.update_layout(xaxis_title="Week", yaxis_title="Count")
     st.plotly_chart(fig, use_container_width=True)
 
-    # --- Tickets by Tag ---
-    st.subheader("Tickets by Tag")
-    tag_df = filtered.explode("tags_list")
-    tag_df = tag_df[tag_df["tags_list"].astype(bool)]
-    if not tag_df.empty:
-        tag_counts = tag_df.groupby("tags_list").size().reset_index(name="count")
-        tag_counts = tag_counts.sort_values("count", ascending=False).head(15)
-        fig_tags = px.bar(tag_counts, x="tags_list", y="count", text_auto=True,
-                          labels={"tags_list": "Tag", "count": "Count"})
-        st.plotly_chart(fig_tags, use_container_width=True)
-    else:
-        st.info("No tagged items in the current filter.")
+    # --- Tickets Older Than 2 Weeks & Tickets by Tag ---
+    col_old, col_tag = st.columns(2)
+
+    with col_old:
+        st.subheader("Tickets Older Than 2 Weeks")
+        open_states = [s for s in filtered["state"].unique() if s not in ["Closed", "Resolved", "Done", "Complete"]]
+        old_tickets = filtered[(filtered["state"].isin(open_states)) & (filtered["age_days"] > 14)]
+        if not old_tickets.empty:
+            old_display = old_tickets[["id", "title", "assigned_to", "state", "created_date", "age_days"]].copy()
+            old_display.columns = ["ID", "Title", "Assigned To", "State", "Created", "Age (Days)"]
+            old_display["Created"] = old_display["Created"].dt.strftime("%Y-%m-%d")
+            old_display = old_display.sort_values("Age (Days)", ascending=False)
+            st.dataframe(old_display, use_container_width=True, hide_index=True)
+        else:
+            st.info("No open tickets older than 2 weeks.")
+
+    with col_tag:
+        st.subheader("Tickets by Tag")
+        tag_df = filtered.explode("tags_list")
+        tag_df = tag_df[tag_df["tags_list"].astype(bool)]
+        if not tag_df.empty:
+            tag_counts = tag_df.groupby("tags_list").size().reset_index(name="count")
+            tag_counts = tag_counts.sort_values("count", ascending=False).head(15)
+            fig_tags = px.pie(tag_counts, names="tags_list", values="count", hole=0.4,
+                              labels={"tags_list": "Tag", "count": "Count"})
+            fig_tags.update_traces(textposition="inside", textinfo="label+value")
+            st.plotly_chart(fig_tags, use_container_width=True)
+        else:
+            st.info("No tagged items in the current filter.")
 
     # --- Team Summary Table ---
     st.divider()
     st.subheader("Team Summary")
 
-    team_names = sorted(filtered["team"].unique())
+    member_names = sorted(filtered["assigned_to"].dropna().unique())
     team_rows = []
 
     # States mapping
@@ -171,60 +197,49 @@ if st.session_state.credential and project:
     complete_states = ["Closed", "Resolved", "Done", "Complete"]
     blocked_states = ["Blocked"]
 
-    for t in team_names:
-        t_df = filtered[filtered["team"] == t]
+    for m in member_names:
+        m_df = filtered[filtered["assigned_to"] == m]
 
-        t_closed = t_df[t_df["state"].isin(complete_states)]
-        t_days = t_closed.apply(
+        m_closed = m_df[m_df["state"].isin(complete_states)]
+        m_days = m_closed.apply(
             lambda r: (r["closed_date"] - r["created_date"]).days if pd.notna(r["closed_date"]) else None, axis=1
         ).dropna()
 
         # Open tickets age
-        t_open = t_df[~t_df["state"].isin(complete_states)]
-        older_week = len(t_open[t_open["age_days"] > 7])
-        older_month = len(t_open[t_open["age_days"] > 30])
+        m_open = m_df[~m_df["state"].isin(complete_states)]
+        older_week = len(m_open[m_open["age_days"] > 7])
+        older_month = len(m_open[m_open["age_days"] > 30])
 
-        avg_comments = t_df["comment_count"].mean() if "comment_count" in t_df.columns and t_df["comment_count"].notna().any() else None
+        avg_comments = m_df["comment_count"].mean() if "comment_count" in m_df.columns and m_df["comment_count"].notna().any() else None
 
         team_rows.append({
-            "Team": t,
-            "Created": int(len(t_df[t_df["state"].isin(new_states)])),
-            "Evaluate": int(len(t_df[t_df["state"].isin(evaluate_states)])),
-            "Approved/Active/In Progress": int(len(t_df[t_df["state"].isin(active_group_states)])),
-            "Complete": int(len(t_closed)),
-            "Blocked": int(len(t_df[t_df["state"].isin(blocked_states)])),
-            "Avg Days to Complete": round(t_days.mean(), 1) if len(t_days) > 0 else "N/A",
+            "Member": m,
+            "Team": member_to_team.get(m, "Unassigned"),
+            "Created": int(len(m_df[m_df["state"].isin(new_states)])),
+            "Evaluate": int(len(m_df[m_df["state"].isin(evaluate_states)])),
+            "Approved/Active/In Progress": int(len(m_df[m_df["state"].isin(active_group_states)])),
+            "Complete": int(len(m_closed)),
+            "Blocked": int(len(m_df[m_df["state"].isin(blocked_states)])),
+            "Avg Days to Complete": round(m_days.mean(), 1) if len(m_days) > 0 else "N/A",
             "Avg Comments/Ticket": round(avg_comments, 1) if pd.notna(avg_comments) else "N/A",
             "Older Than Week": int(older_week),
             "Older Than Month": int(older_month),
         })
 
     team_summary_df = pd.DataFrame(team_rows)
-
-    def highlight_old_columns(row):
-        styles = [""] * len(row)
-        cols = list(row.index)
-        week_idx = cols.index("Older Than Week") if "Older Than Week" in cols else -1
-        month_idx = cols.index("Older Than Month") if "Older Than Month" in cols else -1
-        if month_idx >= 0 and row["Older Than Month"] > 0:
-            styles[month_idx] = "background-color: #ffcccc; color: #8b0000"
-        if week_idx >= 0 and row["Older Than Week"] > 0:
-            styles[week_idx] = "background-color: #ffffcc; color: #8b8000"
-        return styles
-
-    styled_summary = team_summary_df.style.apply(highlight_old_columns, axis=1)
-    st.dataframe(styled_summary, use_container_width=True, hide_index=True)
+    st.dataframe(team_summary_df, use_container_width=True, hide_index=True)
 
     # --- Team Ticket Details (replaces Kanban) ---
     st.divider()
     st.subheader("Team Ticket Details")
 
-    selected_team = st.selectbox("Select Team", ["All"] + team_names)
+    all_members = sorted(filtered["assigned_to"].dropna().unique())
+    selected_member = st.selectbox("Select Team Member", ["All"] + list(all_members))
 
-    if selected_team == "All":
+    if selected_member == "All":
         detail_df = filtered
     else:
-        detail_df = filtered[filtered["team"] == selected_team]
+        detail_df = filtered[filtered["assigned_to"] == selected_member]
 
     # Status ordering
     state_order = ["New", "Created", "Evaluate", "Approved", "Active", "In Progress", "Blocked", "Resolved", "Closed", "Done", "Complete"]
@@ -232,14 +247,6 @@ if st.session_state.credential and project:
     for s in detail_df["state"].unique():
         if s not in active_states_in_data:
             active_states_in_data.append(s)
-
-    def highlight_old_tickets(row):
-        age = row.get("Age (Days)", 0)
-        if pd.notna(age) and age > 30:
-            return ["background-color: #ffcccc"] * len(row)
-        elif pd.notna(age) and age > 7:
-            return ["background-color: #ffffcc"] * len(row)
-        return [""] * len(row)
 
     for state_name in active_states_in_data:
         state_items = detail_df[detail_df["state"] == state_name]
@@ -252,8 +259,7 @@ if st.session_state.credential and project:
         display_df.columns = ["ID", "Title", "Assigned To", "Type", "Area Path", "Created", "Age (Days)", "Comments", "Tags"]
         display_df["Created"] = display_df["Created"].dt.strftime("%Y-%m-%d")
 
-        styled = display_df.style.apply(highlight_old_tickets, axis=1)
-        st.dataframe(styled, use_container_width=True, hide_index=True)
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
 
         st.divider()
 
