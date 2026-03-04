@@ -6,7 +6,7 @@ from ado_client import get_credential, get_ado_connection, fetch_work_items, ADO
 from teams import load_teams
 
 st.set_page_config(page_title="ADO Dashboard", layout="wide")
-st.title("Data Modeling Management Dashboard")
+# st.title("Data Modeling Management Dashboard")
 
 # --- Session state for auth ---
 if "credential" not in st.session_state:
@@ -81,6 +81,8 @@ def load_data(org_url, token, project, start_date, end_date, area_paths, members
     """
     return fetch_work_items(conn, project, wiql)
 
+
+st.title(f"Management Dashboard: {selected_team}")
 
 if st.session_state.credential and project and selected_team and selected_team != "(No teams configured)":
     token = st.session_state.credential.get_token(ADO_SCOPE).token
@@ -160,15 +162,15 @@ if st.session_state.credential and project and selected_team and selected_team !
         ("Closed", closed_tickets),
     ]
 
-    # FleetTrack only for Data Modeling team
-    if selected_team == "Data Modeling":
-        fleet_track_tickets = len(filtered[filtered["tags_list"].apply(lambda t: "Fleet Track" in t)])
-        all_kpis.append(("FleetTrack", fleet_track_tickets))
-
     all_kpis.append(("Median Days", round(median_days, 1) if pd.notna(median_days) else "N/A"))
     all_kpis.append(("> 2 Weeks", over_2_weeks_count))
     all_kpis.append(("> Month", over_month_count))
     all_kpis.append(("Wrong Area", wrong_area_count))
+
+    # FleetTrack only for Data Modeling team
+    if selected_team == "Data Modeling":
+        fleet_track_tickets = len(filtered[filtered["tags_list"].apply(lambda t: "Fleet Track" in t)])
+        all_kpis.append(("FleetTrack", fleet_track_tickets))
 
     # Area KPIs from team config
     for ap in team_areas:
@@ -200,15 +202,19 @@ if st.session_state.credential and project and selected_team and selected_team !
     col_old, col_area = st.columns([2, 1])
 
     with col_old:
-        st.subheader("Tickets Older Than 2 Weeks")
+        st.subheader("Old Tickets")
         open_states = [s for s in filtered["state"].unique() if s not in ["Closed", "Resolved", "Done", "Complete"]]
-        old_tickets = filtered[(filtered["state"].isin(open_states)) & (filtered["age_days"] > 14)]
+        old_tickets = filtered[(filtered["state"].isin(open_states)) & (filtered["age_days"] > 14) & (filtered["assigned_to"].isin(team_members))]
         if not old_tickets.empty:
-            old_display = old_tickets[["id", "title", "assigned_to", "state", "created_date", "age_days"]].copy()
-            old_display.columns = ["ID", "Title", "Assigned To", "State", "Created", "Age (Days)"]
-            old_display["Created"] = old_display["Created"].dt.strftime("%Y-%m-%d")
+            # old_display = old_tickets[["id", "title", "assigned_to", "state", "created_date", "age_days"]].copy()
+            # old_display.columns = ["ID", "Title", "Assigned To", "State", "Created", "Age (Days)"]
+            # old_display["Created"] = old_display["Created"].dt.strftime("%Y-%m-%d")
+            old_display = old_tickets[["id", "title", "assigned_to", "state", "age_days"]].copy()
+            old_display.columns = ["ID", "Title", "Assigned To", "State", "Age (Days)"]
             old_display = old_display.sort_values("Age (Days)", ascending=False)
-            st.dataframe(old_display, use_container_width=True, hide_index=True)
+            old_display["ID"] = old_display["ID"].apply(lambda x: f"{org_url}/{project}/_workitems/edit/{x}")
+            st.dataframe(old_display, use_container_width=True, hide_index=True,
+                column_config={"ID": st.column_config.LinkColumn(display_text=r"(\d+)$")})
         else:
             st.info("No open tickets older than 2 weeks.")
 
@@ -249,14 +255,14 @@ if st.session_state.credential and project and selected_team and selected_team !
         ).dropna()
 
         m_open = m_df[~m_df["state"].isin(complete_states)]
-        older_week = len(m_open[m_open["age_days"] > 7])
+        older_week = len(m_open[m_open["age_days"] > 14])
         older_month = len(m_open[m_open["age_days"] > 30])
 
         avg_comments = m_df["comment_count"].mean() if "comment_count" in m_df.columns and m_df["comment_count"].notna().any() else None
 
         team_rows.append({
             "Member": m,
-            "Team": member_to_team.get(m, "Unassigned"),
+            # "Team": member_to_team.get(m, "Unassigned"),
             "Created": int(len(m_df[m_df["state"].isin(new_states)])),
             "Evaluate": int(len(m_df[m_df["state"].isin(evaluate_states)])),
             "Active": int(len(m_df[m_df["state"].isin(active_group_states)])),
@@ -264,22 +270,26 @@ if st.session_state.credential and project and selected_team and selected_team !
             "Blocked": int(len(m_df[m_df["state"].isin(blocked_states)])),
             "Avg Days to Complete": round(m_days.mean(), 1) if len(m_days) > 0 else "N/A",
             "Avg Comments/Ticket": round(avg_comments, 1) if pd.notna(avg_comments) else "N/A",
-            "> Week": int(older_week),
+            "> 2 Weeks": int(older_week),
             "> Month": int(older_month),
         })
 
     team_summary_df = pd.DataFrame(team_rows)
 
-    # Style with yellow/red borders on > Week / > Month columns
-    def style_borders(df):
+    # Style with bright yellow/red text on aging columns
+    def style_aging(df):
         styles = pd.DataFrame('', index=df.index, columns=df.columns)
-        if "> Week" in df.columns:
-            styles["> Week"] = "border: 2px solid #FFD700;"
+        if "> 2 Weeks" in df.columns:
+            styles["> 2 Weeks"] = df["> 2 Weeks"].apply(
+                lambda v: "color: #FFD700; font-weight: bold" if v > 0 else ""
+            )
         if "> Month" in df.columns:
-            styles["> Month"] = "border: 2px solid #FF0000;"
+            styles["> Month"] = df["> Month"].apply(
+                lambda v: "color: #FF0000; font-weight: bold" if v > 0 else ""
+            )
         return styles
 
-    styled_summary = team_summary_df.style.apply(style_borders, axis=None).format({
+    styled_summary = team_summary_df.style.apply(style_aging, axis=None).format({
         "Avg Days to Complete": lambda x: f"{x:.1f}" if isinstance(x, (int, float)) else x,
         "Avg Comments/Ticket": lambda x: f"{x:.1f}" if isinstance(x, (int, float)) else x,
     })
@@ -318,8 +328,10 @@ if st.session_state.credential and project and selected_team and selected_team !
     detail_df = detail_df.sort_values("age_days", ascending=False)
 
     if not detail_df.empty:
-        display_df = detail_df[["id", "title", "assigned_to", "display_status", "type", "area_path", "created_date", "age_days", "comment_count", "tags"]].copy()
-        display_df.columns = ["ID", "Title", "Assigned To", "Status", "Type", "Area Path", "Created", "Age (Days)", "Comments", "Tags"]
+        # display_df = detail_df[["id", "title", "assigned_to", "display_status", "type", "area_path", "created_date", "age_days", "comment_count", "tags"]].copy()
+        # display_df.columns = ["ID", "Title", "Assigned To", "Status", "Type", "Area Path", "Created", "Age (Days)", "Comments", "Tags"]
+        display_df = detail_df[["id", "title", "assigned_to", "display_status", "type", "area_path", "created_date", "age_days", "comment_count"]].copy()
+        display_df.columns = ["ID", "Title", "Assigned To", "Status", "Type", "Area Path", "Created", "Age (Days)", "Comments"]
         display_df["Created"] = display_df["Created"].dt.strftime("%Y-%m-%d")
 
         def style_old_rows(row):
@@ -327,8 +339,10 @@ if st.session_state.credential and project and selected_team and selected_team !
                 return ["color: #FF0000; font-weight: bold"] * len(row)
             return [""] * len(row)
 
+        display_df["ID"] = display_df["ID"].apply(lambda x: f"{org_url}/{project}/_workitems/edit/{x}")
         styled_detail = display_df.style.apply(style_old_rows, axis=1)
-        st.dataframe(styled_detail, use_container_width=True, hide_index=True)
+        st.dataframe(styled_detail, use_container_width=True, hide_index=True,
+            column_config={"ID": st.column_config.LinkColumn(display_text=r"(\d+)$")})
     else:
         st.info("No active tickets to display.")
 
@@ -348,7 +362,9 @@ if st.session_state.credential and project and selected_team and selected_team !
         outside_display = outside_df[["id", "title", "assigned_to", "state", "area_path", "created_date", "age_days"]].copy()
         outside_display.columns = ["ID", "Title", "Assigned To", "Status", "Area Path", "Created", "Age (Days)"]
         outside_display["Created"] = outside_display["Created"].dt.strftime("%Y-%m-%d")
-        st.dataframe(outside_display, use_container_width=True, hide_index=True)
+        outside_display["ID"] = outside_display["ID"].apply(lambda x: f"{org_url}/{project}/_workitems/edit/{x}")
+        st.dataframe(outside_display, use_container_width=True, hide_index=True,
+            column_config={"ID": st.column_config.LinkColumn(display_text=r"(\d+)$")})
     else:
         st.info("No active team tickets outside designated areas.")
 
