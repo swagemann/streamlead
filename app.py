@@ -141,6 +141,18 @@ if st.session_state.credential and project and selected_team and selected_team !
     active_tickets = len(filtered[filtered["state"].isin(["Approved", "Active", "In Progress", "New", "Created", "Evaluate"])])
     closed_tickets = len(closed_items)
 
+    # Aging KPIs
+    open_for_aging = filtered[~filtered["state"].isin(["Closed", "Resolved", "Done", "Complete"])]
+    over_2_weeks_count = len(open_for_aging[open_for_aging["age_days"] > 14])
+    over_month_count = len(open_for_aging[open_for_aging["age_days"] > 30])
+
+    # Wrong area count
+    wrong_area_count = len(df[
+        (~df["in_designated_area"]) &
+        (df["assigned_to"].isin(team_members)) &
+        (df["state"].isin(["New", "Created", "Evaluate", "Approved", "Active", "In Progress"]))
+    ])
+
     # Non-area KPIs
     all_kpis = [
         ("Total", total_tickets),
@@ -153,7 +165,10 @@ if st.session_state.credential and project and selected_team and selected_team !
         fleet_track_tickets = len(filtered[filtered["tags_list"].apply(lambda t: "Fleet Track" in t)])
         all_kpis.append(("FleetTrack", fleet_track_tickets))
 
-    all_kpis.append(("Median Days to Close", round(median_days, 1) if pd.notna(median_days) else "N/A"))
+    all_kpis.append(("Median Days", round(median_days, 1) if pd.notna(median_days) else "N/A"))
+    all_kpis.append(("> 2 Weeks", over_2_weeks_count))
+    all_kpis.append(("> Month", over_month_count))
+    all_kpis.append(("Wrong Area", wrong_area_count))
 
     # Area KPIs from team config
     for ap in team_areas:
@@ -193,18 +208,7 @@ if st.session_state.credential and project and selected_team and selected_team !
             old_display.columns = ["ID", "Title", "Assigned To", "State", "Created", "Age (Days)"]
             old_display["Created"] = old_display["Created"].dt.strftime("%Y-%m-%d")
             old_display = old_display.sort_values("Age (Days)", ascending=False)
-            html_table = old_display.to_html(index=False)
-            st.markdown(
-                f'<div style="border: 3px solid #FF4444; border-radius: 8px; padding: 8px; max-height: 500px; overflow-y: auto;">'
-                f'<style>'
-                f'.old-tbl table {{ width: 100%; border-collapse: collapse; font-size: 14px; }}'
-                f'.old-tbl th {{ background-color: #f0f2f6; padding: 8px; text-align: left; border-bottom: 2px solid #ddd; }}'
-                f'.old-tbl td {{ padding: 6px 8px; border-bottom: 1px solid #eee; }}'
-                f'</style>'
-                f'<div class="old-tbl">{html_table}</div>'
-                f'</div>',
-                unsafe_allow_html=True
-            )
+            st.dataframe(old_display, use_container_width=True, hide_index=True)
         else:
             st.info("No open tickets older than 2 weeks.")
 
@@ -225,7 +229,10 @@ if st.session_state.credential and project and selected_team and selected_team !
     st.divider()
     st.subheader("Team Summary")
 
-    member_names = sorted(filtered["assigned_to"].dropna().unique())
+    if team_members:
+        member_names = sorted(set(team_members) & set(filtered["assigned_to"].dropna().unique()))
+    else:
+        member_names = sorted(filtered["assigned_to"].dropna().unique())
     team_rows = []
 
     new_states = ["New", "Created"]
@@ -272,18 +279,27 @@ if st.session_state.credential and project and selected_team and selected_team !
             styles["> Month"] = "border: 2px solid #FF0000;"
         return styles
 
-    styled_summary = team_summary_df.style.apply(style_borders, axis=None)
+    styled_summary = team_summary_df.style.apply(style_borders, axis=None).format({
+        "Avg Days to Complete": lambda x: f"{x:.1f}" if isinstance(x, (int, float)) else x,
+        "Avg Comments/Ticket": lambda x: f"{x:.1f}" if isinstance(x, (int, float)) else x,
+    })
     st.dataframe(styled_summary, use_container_width=True, hide_index=True)
 
     # --- Team Ticket Details ---
     st.divider()
     st.subheader("Team Ticket Details")
 
-    all_members = sorted(filtered["assigned_to"].dropna().unique())
+    if team_members:
+        all_members = sorted(set(team_members) & set(filtered["assigned_to"].dropna().unique()))
+    else:
+        all_members = sorted(filtered["assigned_to"].dropna().unique())
     selected_member = st.selectbox("Select Team Member", ["All"] + list(all_members))
 
     if selected_member == "All":
-        detail_df = filtered.copy()
+        if team_members:
+            detail_df = filtered[filtered["assigned_to"].isin(team_members)].copy()
+        else:
+            detail_df = filtered.copy()
     else:
         detail_df = filtered[filtered["assigned_to"] == selected_member].copy()
 
@@ -305,7 +321,14 @@ if st.session_state.credential and project and selected_team and selected_team !
         display_df = detail_df[["id", "title", "assigned_to", "display_status", "type", "area_path", "created_date", "age_days", "comment_count", "tags"]].copy()
         display_df.columns = ["ID", "Title", "Assigned To", "Status", "Type", "Area Path", "Created", "Age (Days)", "Comments", "Tags"]
         display_df["Created"] = display_df["Created"].dt.strftime("%Y-%m-%d")
-        st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+        def style_old_rows(row):
+            if row["Age (Days)"] > 30:
+                return ["color: #FF0000; font-weight: bold"] * len(row)
+            return [""] * len(row)
+
+        styled_detail = display_df.style.apply(style_old_rows, axis=1)
+        st.dataframe(styled_detail, use_container_width=True, hide_index=True)
     else:
         st.info("No active tickets to display.")
 

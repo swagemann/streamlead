@@ -8,7 +8,8 @@
       "Bash(grep -h \"^import\\\\|^from\" *.py)",
       "Bash(unzip -l streamlead_zip.zip)",
       "Bash(pip install azure-identity)",
-      "Bash(unzip -l /c/streamlead/streamlead_zip.zip)"
+      "Bash(unzip -l /c/streamlead/streamlead_zip.zip)",
+      "Bash(wc -l *.py *.json)"
     ]
   }
 }
