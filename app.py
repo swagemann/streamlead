@@ -232,6 +232,7 @@ if st.session_state.credential and project and selected_team and selected_team !
         stale_tickets = filtered[
             (filtered["state"].isin(open_states)) &
             (filtered["assigned_to"].isin(team_members)) &
+            (filtered["age_days"] > 7) &
             (
                 (filtered["days_since_comment"].isna()) |
                 (filtered["days_since_comment"] > 7)
@@ -239,14 +240,17 @@ if st.session_state.credential and project and selected_team and selected_team !
         ]
         if not stale_tickets.empty:
             stale_display = stale_tickets[["id", "title", "assigned_to", "state", "age_days", "days_since_comment"]].copy()
-            stale_display.columns = ["ID", "Title", "Assigned To", "State", "Age (Days)", "Days Since Comment"]
-            stale_display["Days Since Comment"] = stale_display["Days Since Comment"].apply(
-                lambda x: int(x) if pd.notna(x) else "No Comment"
+            stale_display.columns = ["ID", "Title", "Assigned To", "State", "Age (Days)", "Stale (Days)"]
+            stale_display["Stale (Days)"] = stale_display["Stale (Days)"].apply(
+                lambda x: int(x) if pd.notna(x) else "N/A"
             )
             stale_display = stale_display.sort_values("Age (Days)", ascending=False)
             stale_display["ID"] = stale_display["ID"].apply(lambda x: f"{org_url}/{project}/_workitems/edit/{x}")
             st.dataframe(stale_display, use_container_width=True, hide_index=True,
-                column_config={"ID": st.column_config.LinkColumn(display_text=r"(\d+)$")})
+                column_config={
+                    "ID": st.column_config.LinkColumn(display_text=r"(\d+)$"),
+                    "Title": st.column_config.TextColumn(width="small"),
+                })
         else:
             st.info("No stale tickets — all have team comments within the past week.")
 
@@ -290,7 +294,8 @@ if st.session_state.credential and project and selected_team and selected_team !
         older_week = len(m_open[(m_open["age_days"] > 14) & (m_open["age_days"] <= 30)])
         older_month = len(m_open[m_open["age_days"] > 30])
         stale_count = len(m_open[
-            (m_open["days_since_comment"].isna()) | (m_open["days_since_comment"] > 7)
+            (m_open["age_days"] > 7) &
+            ((m_open["days_since_comment"].isna()) | (m_open["days_since_comment"] > 7))
         ])
 
         avg_comments = m_df["comment_count"].mean() if "comment_count" in m_df.columns and m_df["comment_count"].notna().any() else None
