@@ -2,7 +2,7 @@
 import streamlit as st
 import plotly.express as px
 import pandas as pd
-from ado_client import get_credential, get_ado_connection, fetch_work_items, ADO_SCOPE
+from ado_client import get_credential, get_ado_connection, fetch_work_items, fetch_last_team_comment_dates, ADO_SCOPE
 from teams import load_teams
 
 st.set_page_config(page_title="ADO Dashboard", layout="wide")
@@ -82,6 +82,12 @@ def load_data(org_url, token, project, start_date, end_date, area_paths, members
     return fetch_work_items(conn, project, wiql)
 
 
+@st.cache_data(ttl=300)
+def load_comment_dates(org_url, token, project, work_item_ids, team_members):
+    conn = get_ado_connection(org_url, token)
+    return fetch_last_team_comment_dates(conn, project, work_item_ids, team_members)
+
+
 st.title(f"Management Dashboard: {selected_team}")
 
 if st.session_state.credential and project and selected_team and selected_team != "(No teams configured)":
@@ -125,6 +131,25 @@ if st.session_state.credential and project and selected_team and selected_team !
 
     # Extract display area (last segment or child area)
     df["display_area"] = df["area_path"].apply(lambda p: p.split("\\")[-1] if p else "Unknown")
+
+    # Fetch last team comment dates for open tickets assigned to team
+    open_mask = ~df["state"].isin(["Closed", "Resolved", "Done", "Complete"])
+    team_mask = df["assigned_to"].isin(team_members)
+    open_team_ids = df.loc[open_mask & team_mask, "id"].tolist()
+
+    if open_team_ids:
+        comment_dates = load_comment_dates(
+            org_url, token, project,
+            tuple(sorted(open_team_ids)),
+            tuple(sorted(team_members))
+        )
+        df["last_team_comment"] = df["id"].map(comment_dates)
+    else:
+        df["last_team_comment"] = pd.NaT
+
+    df["days_since_comment"] = df["last_team_comment"].apply(
+        lambda d: (now - d).days if pd.notna(d) else None
+    )
 
     # Main filtered data (in designated areas)
     filtered = df[df["in_designated_area"]]
@@ -202,21 +227,28 @@ if st.session_state.credential and project and selected_team and selected_team !
     col_old, col_area = st.columns([2, 1])
 
     with col_old:
-        st.subheader("Old Tickets")
+        st.subheader("Stale Tickets")
         open_states = [s for s in filtered["state"].unique() if s not in ["Closed", "Resolved", "Done", "Complete"]]
-        old_tickets = filtered[(filtered["state"].isin(open_states)) & (filtered["age_days"] > 14) & (filtered["assigned_to"].isin(team_members))]
-        if not old_tickets.empty:
-            # old_display = old_tickets[["id", "title", "assigned_to", "state", "created_date", "age_days"]].copy()
-            # old_display.columns = ["ID", "Title", "Assigned To", "State", "Created", "Age (Days)"]
-            # old_display["Created"] = old_display["Created"].dt.strftime("%Y-%m-%d")
-            old_display = old_tickets[["id", "title", "assigned_to", "state", "age_days"]].copy()
-            old_display.columns = ["ID", "Title", "Assigned To", "State", "Age (Days)"]
-            old_display = old_display.sort_values("Age (Days)", ascending=False)
-            old_display["ID"] = old_display["ID"].apply(lambda x: f"{org_url}/{project}/_workitems/edit/{x}")
-            st.dataframe(old_display, use_container_width=True, hide_index=True,
+        stale_tickets = filtered[
+            (filtered["state"].isin(open_states)) &
+            (filtered["assigned_to"].isin(team_members)) &
+            (
+                (filtered["days_since_comment"].isna()) |
+                (filtered["days_since_comment"] > 7)
+            )
+        ]
+        if not stale_tickets.empty:
+            stale_display = stale_tickets[["id", "title", "assigned_to", "state", "age_days", "days_since_comment"]].copy()
+            stale_display.columns = ["ID", "Title", "Assigned To", "State", "Age (Days)", "Days Since Comment"]
+            stale_display["Days Since Comment"] = stale_display["Days Since Comment"].apply(
+                lambda x: int(x) if pd.notna(x) else "No Comment"
+            )
+            stale_display = stale_display.sort_values("Age (Days)", ascending=False)
+            stale_display["ID"] = stale_display["ID"].apply(lambda x: f"{org_url}/{project}/_workitems/edit/{x}")
+            st.dataframe(stale_display, use_container_width=True, hide_index=True,
                 column_config={"ID": st.column_config.LinkColumn(display_text=r"(\d+)$")})
         else:
-            st.info("No open tickets older than 2 weeks.")
+            st.info("No stale tickets — all have team comments within the past week.")
 
     with col_area:
         st.subheader("Tickets by Area")
@@ -255,8 +287,11 @@ if st.session_state.credential and project and selected_team and selected_team !
         ).dropna()
 
         m_open = m_df[~m_df["state"].isin(complete_states)]
-        older_week = len(m_open[m_open["age_days"] > 14])
+        older_week = len(m_open[(m_open["age_days"] > 14) & (m_open["age_days"] <= 30)])
         older_month = len(m_open[m_open["age_days"] > 30])
+        stale_count = len(m_open[
+            (m_open["days_since_comment"].isna()) | (m_open["days_since_comment"] > 7)
+        ])
 
         avg_comments = m_df["comment_count"].mean() if "comment_count" in m_df.columns and m_df["comment_count"].notna().any() else None
 
@@ -272,6 +307,7 @@ if st.session_state.credential and project and selected_team and selected_team !
             "Avg Comments/Ticket": round(avg_comments, 1) if pd.notna(avg_comments) else "N/A",
             "> 2 Weeks": int(older_week),
             "> Month": int(older_month),
+            "Stale (> 1 Wk)": int(stale_count),
         })
 
     team_summary_df = pd.DataFrame(team_rows)
@@ -286,6 +322,10 @@ if st.session_state.credential and project and selected_team and selected_team !
         if "> Month" in df.columns:
             styles["> Month"] = df["> Month"].apply(
                 lambda v: "color: #FF0000; font-weight: bold" if v > 0 else ""
+            )
+        if "Stale (> 1 Wk)" in df.columns:
+            styles["Stale (> 1 Wk)"] = df["Stale (> 1 Wk)"].apply(
+                lambda v: "color: #FFA500; font-weight: bold" if v > 0 else ""
             )
         return styles
 

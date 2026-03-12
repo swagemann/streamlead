@@ -91,3 +91,25 @@ def fetch_work_items(connection, project, wiql_query):
         )
 
     return pd.DataFrame(rows)
+
+
+def fetch_last_team_comment_dates(connection, project, work_item_ids, team_members):
+    """Fetch the date of the last comment by a team member for each work item."""
+    client = connection.clients.get_work_item_tracking_client()
+    team_set = set(team_members)
+    result = {}
+    for wid in work_item_ids:
+        try:
+            comments = client.get_comments(project, wid)
+            last_date = None
+            if comments.comments:
+                for c in comments.comments:
+                    author_name = c.created_by.display_name if c.created_by else None
+                    if author_name in team_set:
+                        cdate = pd.to_datetime(c.created_date)
+                        if last_date is None or cdate > last_date:
+                            last_date = cdate
+            result[wid] = last_date
+        except Exception:
+            result[wid] = None
+    return result
