@@ -2,6 +2,7 @@
 import streamlit as st
 import plotly.express as px
 import pandas as pd
+import os
 from ado_client import get_credential, get_ado_connection, fetch_work_items, fetch_last_team_comment_dates, ADO_SCOPE
 from teams import load_teams
 
@@ -90,336 +91,347 @@ def load_comment_dates(org_url, token, project, work_item_ids, team_members):
 
 st.title(f"Management Dashboard: {selected_team}")
 
-if st.session_state.credential and project and selected_team and selected_team != "(No teams configured)":
-    token = st.session_state.credential.get_token(ADO_SCOPE).token
+tab_dashboard, tab_docs = st.tabs(["Dashboard", "Docs"])
 
-    team_config = teams[selected_team]
-    team_members = team_config.get("members", [])
-    team_areas = team_config.get("areas", [])
+with tab_docs:
+    docs_path = os.path.join(os.path.dirname(__file__), "ado-ticket-guidelines.md")
+    if os.path.exists(docs_path):
+        with open(docs_path, "r") as f:
+            st.markdown(f.read())
+    else:
+        st.warning("Documentation file not found.")
 
-    df = load_data(
-        org_url, token, project,
-        str(date_range[0]), str(date_range[1]),
-        tuple(team_areas), tuple(team_members)
-    )
+with tab_dashboard:
+    if st.session_state.credential and project and selected_team and selected_team != "(No teams configured)":
+        token = st.session_state.credential.get_token(ADO_SCOPE).token
 
-    # Derive tags_list
-    df["tags_list"] = df["tags"].apply(
-        lambda t: [x.strip() for x in t.split(";") if x.strip()] if t else []
-    )
+        team_config = teams[selected_team]
+        team_members = team_config.get("members", [])
+        team_areas = team_config.get("areas", [])
 
-    # Build team lookup
-    member_to_team = {}
-    for tn, tc in teams.items():
-        for m in tc.get("members", []):
-            member_to_team[m] = tn
-    df["team"] = df["assigned_to"].map(member_to_team).fillna("Unassigned")
-
-    # Compute ticket age
-    now = pd.Timestamp.now(tz="UTC")
-    df["age_days"] = (now - df["created_date"]).dt.days
-
-    # Determine if ticket is in designated areas
-    def is_in_designated_areas(area_path):
-        for ap in team_areas:
-            full_path = f"{project}\\{ap}"
-            if area_path == full_path or area_path.startswith(full_path + "\\"):
-                return True
-        return False
-
-    df["in_designated_area"] = df["area_path"].apply(is_in_designated_areas)
-
-    # Extract display area (last segment or child area)
-    df["display_area"] = df["area_path"].apply(lambda p: p.split("\\")[-1] if p else "Unknown")
-
-    # Fetch last team comment dates for open tickets assigned to team
-    open_mask = ~df["state"].isin(["Closed", "Resolved", "Done", "Complete"])
-    team_mask = df["assigned_to"].isin(team_members)
-    open_team_ids = df.loc[open_mask & team_mask, "id"].tolist()
-
-    if open_team_ids:
-        comment_dates = load_comment_dates(
+        df = load_data(
             org_url, token, project,
-            tuple(sorted(open_team_ids)),
-            tuple(sorted(team_members))
+            str(date_range[0]), str(date_range[1]),
+            tuple(team_areas), tuple(team_members)
         )
-        df["last_team_comment"] = df["id"].map(comment_dates)
-    else:
-        df["last_team_comment"] = pd.NaT
 
-    df["days_since_comment"] = df["last_team_comment"].apply(
-        lambda d: (now - d).days if pd.notna(d) else None
-    )
+        # Derive tags_list
+        df["tags_list"] = df["tags"].apply(
+            lambda t: [x.strip() for x in t.split(";") if x.strip()] if t else []
+        )
 
-    # Main filtered data (in designated areas)
-    filtered = df[df["in_designated_area"]]
+        # Build team lookup
+        member_to_team = {}
+        for tn, tc in teams.items():
+            for m in tc.get("members", []):
+                member_to_team[m] = tn
+        df["team"] = df["assigned_to"].map(member_to_team).fillna("Unassigned")
 
-    # --- KPI Row ---
-    closed_items = filtered.dropna(subset=["closed_date"])
-    days_to_close = closed_items.apply(
-        lambda r: (r["closed_date"] - r["created_date"]).days, axis=1
-    )
-    median_days = days_to_close.median() if len(days_to_close) > 0 else None
+        # Compute ticket age
+        now = pd.Timestamp.now(tz="UTC")
+        df["age_days"] = (now - df["created_date"]).dt.days
 
-    def count_area(keyword):
-        return len(filtered[filtered["area_path"].str.contains(keyword, case=False, na=False)])
+        # Determine if ticket is in designated areas
+        def is_in_designated_areas(area_path):
+            for ap in team_areas:
+                full_path = f"{project}\\{ap}"
+                if area_path == full_path or area_path.startswith(full_path + "\\"):
+                    return True
+            return False
 
-    total_tickets = len(filtered)
-    active_tickets = len(filtered[filtered["state"].isin(["Approved", "Active", "In Progress", "New", "Created", "Evaluate"])])
-    closed_tickets = len(closed_items)
+        df["in_designated_area"] = df["area_path"].apply(is_in_designated_areas)
 
-    # Aging KPIs
-    open_for_aging = filtered[~filtered["state"].isin(["Closed", "Resolved", "Done", "Complete"])]
-    over_2_weeks_count = len(open_for_aging[open_for_aging["age_days"] > 14])
-    over_month_count = len(open_for_aging[open_for_aging["age_days"] > 30])
+        # Extract display area (last segment or child area)
+        df["display_area"] = df["area_path"].apply(lambda p: p.split("\\")[-1] if p else "Unknown")
 
-    # Stale KPI (same logic as stale tickets table)
-    open_for_stale = open_for_aging[open_for_aging["assigned_to"].isin(team_members)]
-    stale_count_kpi = len(open_for_stale[
-        (open_for_stale["age_days"] > 7) &
-        ((open_for_stale["days_since_comment"].isna()) | (open_for_stale["days_since_comment"] > 7))
-    ])
+        # Fetch last team comment dates for open tickets assigned to team
+        open_mask = ~df["state"].isin(["Closed", "Resolved", "Done", "Complete"])
+        team_mask = df["assigned_to"].isin(team_members)
+        open_team_ids = df.loc[open_mask & team_mask, "id"].tolist()
 
-    # Wrong area count
-    wrong_area_count = len(df[
-        (~df["in_designated_area"]) &
-        (df["assigned_to"].isin(team_members)) &
-        (df["state"].isin(["New", "Created", "Evaluate", "Approved", "Active", "In Progress"]))
-    ])
-
-    # Non-area KPIs
-    all_kpis = [
-        ("Total", total_tickets),
-        ("Active", active_tickets),
-        ("Closed", closed_tickets),
-    ]
-
-    all_kpis.append(("Median Days", round(median_days, 1) if pd.notna(median_days) else "N/A"))
-    all_kpis.append(("Stale", stale_count_kpi))
-    all_kpis.append(("> 2 Weeks", over_2_weeks_count))
-    all_kpis.append(("> Month", over_month_count))
-    all_kpis.append(("Wrong Area", wrong_area_count))
-
-    # FleetTrack only for Data Modeling team
-    if selected_team == "Data Modeling":
-        fleet_track_tickets = len(filtered[filtered["tags_list"].apply(lambda t: "Fleet Track" in t)])
-        all_kpis.append(("FleetTrack", fleet_track_tickets))
-
-    # Area KPIs from team config
-    for ap in team_areas:
-        area_name = ap.split("\\")[-1] if "\\" in ap else ap
-        all_kpis.append((area_name, count_area(area_name)))
-
-    cols = st.columns(len(all_kpis))
-    for col, (label, value) in zip(cols, all_kpis):
-        col.metric(label, value)
-
-    # --- Tickets Over Time (Bar Chart, full width) ---
-    st.subheader("Tickets Over Time (Created vs Closed)")
-    created_ts = (filtered.set_index("created_date")
-                  .resample("W").size().reset_index(name="created"))
-    closed_ts = (filtered.dropna(subset=["closed_date"])
-                 .set_index("closed_date")
-                 .resample("W").size().reset_index(name="closed"))
-    ts = created_ts.merge(closed_ts, left_on="created_date",
-                          right_on="closed_date", how="outer").fillna(0)
-    ts["date"] = ts["created_date"].combine_first(ts["closed_date"])
-    ts_melted = ts.melt(id_vars=["date"], value_vars=["created", "closed"],
-                        var_name="series", value_name="count")
-    fig = px.bar(ts_melted, x="date", y="count", color="series", barmode="stack",
-                 labels={"count": "Count", "date": "Week", "series": ""})
-    fig.update_layout(xaxis_title="Week", yaxis_title="Count")
-    st.plotly_chart(fig, use_container_width=True)
-
-    # --- Tickets Older Than 2 Weeks & Tickets by Area ---
-    col_old, col_area = st.columns([2, 1])
-
-    with col_old:
-        st.subheader("Stale Tickets")
-        open_states = [s for s in filtered["state"].unique() if s not in ["Closed", "Resolved", "Done", "Complete"]]
-        stale_tickets = filtered[
-            (filtered["state"].isin(open_states)) &
-            (filtered["assigned_to"].isin(team_members)) &
-            (filtered["age_days"] > 7) &
-            (
-                (filtered["days_since_comment"].isna()) |
-                (filtered["days_since_comment"] > 7)
+        if open_team_ids:
+            comment_dates = load_comment_dates(
+                org_url, token, project,
+                tuple(sorted(open_team_ids)),
+                tuple(sorted(team_members))
             )
-        ]
-        if not stale_tickets.empty:
-            stale_display = stale_tickets[["id", "title", "assigned_to", "state", "age_days", "days_since_comment"]].copy()
-            stale_display.columns = ["ID", "Title", "Assigned To", "State", "Age (Days)", "Stale (Days)"]
-            stale_display["Stale (Days)"] = stale_display["Stale (Days)"].apply(
-                lambda x: int(x) if pd.notna(x) else "N/A"
-            )
-            stale_display = stale_display.sort_values("Age (Days)", ascending=False)
-            stale_display["ID"] = stale_display["ID"].apply(lambda x: f"{org_url}/{project}/_workitems/edit/{x}")
-            st.dataframe(stale_display, use_container_width=True, hide_index=True,
-                column_config={
-                    "ID": st.column_config.LinkColumn(display_text=r"(\d+)$"),
-                    "Title": st.column_config.TextColumn(width="small"),
-                })
+            df["last_team_comment"] = df["id"].map(comment_dates)
         else:
-            st.info("No stale tickets — all have team comments within the past week.")
+            df["last_team_comment"] = pd.NaT
 
-    with col_area:
-        st.subheader("Tickets by Area")
-        if not filtered.empty:
-            area_counts = filtered["display_area"].value_counts().reset_index()
-            area_counts.columns = ["Area", "Count"]
-            area_counts = area_counts.head(15)
-            fig_area = px.pie(area_counts, names="Area", values="Count", hole=0.4)
-            fig_area.update_traces(textposition="inside", textinfo="label+value")
-            fig_area.update_layout(showlegend=False)
-            st.plotly_chart(fig_area, use_container_width=True)
-        else:
-            st.info("No items to display.")
+        df["days_since_comment"] = df["last_team_comment"].apply(
+            lambda d: (now - d).days if pd.notna(d) else None
+        )
 
-    # --- Team Summary Table ---
-    st.divider()
-    st.subheader("Team Summary")
+        # Main filtered data (in designated areas)
+        filtered = df[df["in_designated_area"]]
 
-    if team_members:
-        member_names = sorted(set(team_members) & set(filtered["assigned_to"].dropna().unique()))
-    else:
-        member_names = sorted(filtered["assigned_to"].dropna().unique())
-    team_rows = []
+        # --- KPI Row ---
+        closed_items = filtered.dropna(subset=["closed_date"])
+        days_to_close = closed_items.apply(
+            lambda r: (r["closed_date"] - r["created_date"]).days, axis=1
+        )
+        median_days = days_to_close.median() if len(days_to_close) > 0 else None
 
-    new_states = ["New", "Created"]
-    evaluate_states = ["Evaluate"]
-    active_group_states = ["Approved", "Active", "In Progress"]
-    complete_states = ["Closed", "Resolved", "Done", "Complete"]
-    blocked_states = ["Blocked"]
+        def count_area(keyword):
+            return len(filtered[filtered["area_path"].str.contains(keyword, case=False, na=False)])
 
-    for m in member_names:
-        m_df = filtered[filtered["assigned_to"] == m]
-        m_closed = m_df[m_df["state"].isin(complete_states)]
-        m_days = m_closed.apply(
-            lambda r: (r["closed_date"] - r["created_date"]).days if pd.notna(r["closed_date"]) else None, axis=1
-        ).dropna()
+        total_tickets = len(filtered)
+        active_tickets = len(filtered[filtered["state"].isin(["Approved", "Active", "In Progress", "New", "Created", "Evaluate"])])
+        closed_tickets = len(closed_items)
 
-        m_open = m_df[~m_df["state"].isin(complete_states)]
-        older_week = len(m_open[(m_open["age_days"] > 14) & (m_open["age_days"] <= 30)])
-        older_month = len(m_open[m_open["age_days"] > 30])
-        stale_count = len(m_open[
-            (m_open["age_days"] > 7) &
-            ((m_open["days_since_comment"].isna()) | (m_open["days_since_comment"] > 7))
+        # Aging KPIs
+        open_for_aging = filtered[~filtered["state"].isin(["Closed", "Resolved", "Done", "Complete"])]
+        over_2_weeks_count = len(open_for_aging[open_for_aging["age_days"] > 14])
+        over_month_count = len(open_for_aging[open_for_aging["age_days"] > 30])
+
+        # Stale KPI (same logic as stale tickets table)
+        open_for_stale = open_for_aging[open_for_aging["assigned_to"].isin(team_members)]
+        stale_count_kpi = len(open_for_stale[
+            (open_for_stale["age_days"] > 7) &
+            ((open_for_stale["days_since_comment"].isna()) | (open_for_stale["days_since_comment"] > 7))
         ])
 
-        avg_comments = m_df["comment_count"].mean() if "comment_count" in m_df.columns and m_df["comment_count"].notna().any() else None
+        # Wrong area count
+        wrong_area_count = len(df[
+            (~df["in_designated_area"]) &
+            (df["assigned_to"].isin(team_members)) &
+            (df["state"].isin(["New", "Created", "Evaluate", "Approved", "Active", "In Progress"]))
+        ])
 
-        team_rows.append({
-            "Member": m,
-            # "Team": member_to_team.get(m, "Unassigned"),
-            "Created": int(len(m_df[m_df["state"].isin(new_states)])),
-            "Evaluate": int(len(m_df[m_df["state"].isin(evaluate_states)])),
-            "Active": int(len(m_df[m_df["state"].isin(active_group_states)])),
-            "Complete": int(len(m_closed)),
-            "Blocked": int(len(m_df[m_df["state"].isin(blocked_states)])),
-            "Avg Days to Complete": round(m_days.mean(), 1) if len(m_days) > 0 else "N/A",
-            "Avg Comments/Ticket": round(avg_comments, 1) if pd.notna(avg_comments) else "N/A",
-            "> 2 Weeks": int(older_week),
-            "> Month": int(older_month),
-            "Stale (> 1 Wk)": int(stale_count),
+        # Non-area KPIs
+        all_kpis = [
+            ("Total", total_tickets),
+            ("Active", active_tickets),
+            ("Closed", closed_tickets),
+        ]
+
+        all_kpis.append(("Median Days", round(median_days, 1) if pd.notna(median_days) else "N/A"))
+        all_kpis.append(("Stale", stale_count_kpi))
+        all_kpis.append(("> 2 Weeks", over_2_weeks_count))
+        all_kpis.append(("> Month", over_month_count))
+        all_kpis.append(("Wrong Area", wrong_area_count))
+
+        # FleetTrack only for Data Modeling team
+        if selected_team == "Data Modeling":
+            fleet_track_tickets = len(filtered[filtered["tags_list"].apply(lambda t: "Fleet Track" in t)])
+            all_kpis.append(("FleetTrack", fleet_track_tickets))
+
+        # Area KPIs from team config
+        for ap in team_areas:
+            area_name = ap.split("\\")[-1] if "\\" in ap else ap
+            all_kpis.append((area_name, count_area(area_name)))
+
+        cols = st.columns(len(all_kpis))
+        for col, (label, value) in zip(cols, all_kpis):
+            col.metric(label, value)
+
+        # --- Tickets Over Time (Bar Chart, full width) ---
+        st.subheader("Tickets Over Time (Created vs Closed)")
+        created_ts = (filtered.set_index("created_date")
+                      .resample("W").size().reset_index(name="created"))
+        closed_ts = (filtered.dropna(subset=["closed_date"])
+                     .set_index("closed_date")
+                     .resample("W").size().reset_index(name="closed"))
+        ts = created_ts.merge(closed_ts, left_on="created_date",
+                              right_on="closed_date", how="outer").fillna(0)
+        ts["date"] = ts["created_date"].combine_first(ts["closed_date"])
+        ts_melted = ts.melt(id_vars=["date"], value_vars=["created", "closed"],
+                            var_name="series", value_name="count")
+        fig = px.bar(ts_melted, x="date", y="count", color="series", barmode="stack",
+                     labels={"count": "Count", "date": "Week", "series": ""})
+        fig.update_layout(xaxis_title="Week", yaxis_title="Count")
+        st.plotly_chart(fig, use_container_width=True)
+
+        # --- Tickets Older Than 2 Weeks & Tickets by Area ---
+        col_old, col_area = st.columns([2, 1])
+
+        with col_old:
+            st.subheader("Stale Tickets")
+            open_states = [s for s in filtered["state"].unique() if s not in ["Closed", "Resolved", "Done", "Complete"]]
+            stale_tickets = filtered[
+                (filtered["state"].isin(open_states)) &
+                (filtered["assigned_to"].isin(team_members)) &
+                (filtered["age_days"] > 7) &
+                (
+                    (filtered["days_since_comment"].isna()) |
+                    (filtered["days_since_comment"] > 7)
+                )
+            ]
+            if not stale_tickets.empty:
+                stale_display = stale_tickets[["id", "title", "assigned_to", "state", "age_days", "days_since_comment"]].copy()
+                stale_display.columns = ["ID", "Title", "Assigned To", "State", "Age (Days)", "Stale (Days)"]
+                stale_display["Stale (Days)"] = stale_display["Stale (Days)"].apply(
+                    lambda x: int(x) if pd.notna(x) else "N/A"
+                )
+                stale_display = stale_display.sort_values("Age (Days)", ascending=False)
+                stale_display["ID"] = stale_display["ID"].apply(lambda x: f"{org_url}/{project}/_workitems/edit/{x}")
+                st.dataframe(stale_display, use_container_width=True, hide_index=True,
+                    column_config={
+                        "ID": st.column_config.LinkColumn(display_text=r"(\d+)$"),
+                        "Title": st.column_config.TextColumn(width="small"),
+                    })
+            else:
+                st.info("No stale tickets — all have team comments within the past week.")
+
+        with col_area:
+            st.subheader("Tickets by Area")
+            if not filtered.empty:
+                area_counts = filtered["display_area"].value_counts().reset_index()
+                area_counts.columns = ["Area", "Count"]
+                area_counts = area_counts.head(15)
+                fig_area = px.pie(area_counts, names="Area", values="Count", hole=0.4)
+                fig_area.update_traces(textposition="inside", textinfo="label+value")
+                fig_area.update_layout(showlegend=False)
+                st.plotly_chart(fig_area, use_container_width=True)
+            else:
+                st.info("No items to display.")
+
+        # --- Team Summary Table ---
+        st.divider()
+        st.subheader("Team Summary")
+
+        if team_members:
+            member_names = sorted(set(team_members) & set(filtered["assigned_to"].dropna().unique()))
+        else:
+            member_names = sorted(filtered["assigned_to"].dropna().unique())
+        team_rows = []
+
+        new_states = ["New", "Created"]
+        evaluate_states = ["Evaluate"]
+        active_group_states = ["Approved", "Active", "In Progress"]
+        complete_states = ["Closed", "Resolved", "Done", "Complete"]
+        blocked_states = ["Blocked"]
+
+        for m in member_names:
+            m_df = filtered[filtered["assigned_to"] == m]
+            m_closed = m_df[m_df["state"].isin(complete_states)]
+            m_days = m_closed.apply(
+                lambda r: (r["closed_date"] - r["created_date"]).days if pd.notna(r["closed_date"]) else None, axis=1
+            ).dropna()
+
+            m_open = m_df[~m_df["state"].isin(complete_states)]
+            older_week = len(m_open[(m_open["age_days"] > 14) & (m_open["age_days"] <= 30)])
+            older_month = len(m_open[m_open["age_days"] > 30])
+            stale_count = len(m_open[
+                (m_open["age_days"] > 7) &
+                ((m_open["days_since_comment"].isna()) | (m_open["days_since_comment"] > 7))
+            ])
+
+            avg_comments = m_df["comment_count"].mean() if "comment_count" in m_df.columns and m_df["comment_count"].notna().any() else None
+
+            team_rows.append({
+                "Member": m,
+                # "Team": member_to_team.get(m, "Unassigned"),
+                "Created": int(len(m_df[m_df["state"].isin(new_states)])),
+                "Evaluate": int(len(m_df[m_df["state"].isin(evaluate_states)])),
+                "Active": int(len(m_df[m_df["state"].isin(active_group_states)])),
+                "Complete": int(len(m_closed)),
+                "Blocked": int(len(m_df[m_df["state"].isin(blocked_states)])),
+                "Avg Days to Complete": round(m_days.mean(), 1) if len(m_days) > 0 else "N/A",
+                "Avg Comments/Ticket": round(avg_comments, 1) if pd.notna(avg_comments) else "N/A",
+                "> 2 Weeks": int(older_week),
+                "> Month": int(older_month),
+                "Stale (> 1 Wk)": int(stale_count),
+            })
+
+        team_summary_df = pd.DataFrame(team_rows)
+
+        # Style with bright yellow/red text on aging columns
+        def style_aging(df):
+            styles = pd.DataFrame('', index=df.index, columns=df.columns)
+            if "> 2 Weeks" in df.columns:
+                styles["> 2 Weeks"] = df["> 2 Weeks"].apply(
+                    lambda v: "color: #FFD700; font-weight: bold" if v > 0 else ""
+                )
+            if "> Month" in df.columns:
+                styles["> Month"] = df["> Month"].apply(
+                    lambda v: "color: #FF0000; font-weight: bold" if v > 0 else ""
+                )
+            if "Stale (> 1 Wk)" in df.columns:
+                styles["Stale (> 1 Wk)"] = df["Stale (> 1 Wk)"].apply(
+                    lambda v: "color: #FFA500; font-weight: bold" if v > 0 else ""
+                )
+            return styles
+
+        styled_summary = team_summary_df.style.apply(style_aging, axis=None).format({
+            "Avg Days to Complete": lambda x: f"{x:.1f}" if isinstance(x, (int, float)) else x,
+            "Avg Comments/Ticket": lambda x: f"{x:.1f}" if isinstance(x, (int, float)) else x,
+        })
+        st.dataframe(styled_summary, use_container_width=True, hide_index=True)
+
+        # --- Team Ticket Details ---
+        st.divider()
+        st.subheader("Team Ticket Details")
+
+        if team_members:
+            all_members = sorted(set(team_members) & set(filtered["assigned_to"].dropna().unique()))
+        else:
+            all_members = sorted(filtered["assigned_to"].dropna().unique())
+        selected_member = st.selectbox("Select Team Member", ["All"] + list(all_members))
+
+        if selected_member == "All":
+            if team_members:
+                detail_df = filtered[filtered["assigned_to"].isin(team_members)].copy()
+            else:
+                detail_df = filtered.copy()
+        else:
+            detail_df = filtered[filtered["assigned_to"] == selected_member].copy()
+
+        state_order = ["New", "Created", "Evaluate", "Approved", "Active", "In Progress", "Blocked"]
+
+        # Filter to only states in state_order
+        detail_df = detail_df[detail_df["state"].isin(state_order)]
+
+        # Combine Active, Approved, In Progress -> "Active"
+        detail_df["display_status"] = detail_df["state"].replace({
+            "Approved": "Active",
+            "In Progress": "Active",
         })
 
-    team_summary_df = pd.DataFrame(team_rows)
+        # Sort by age descending
+        detail_df = detail_df.sort_values("age_days", ascending=False)
 
-    # Style with bright yellow/red text on aging columns
-    def style_aging(df):
-        styles = pd.DataFrame('', index=df.index, columns=df.columns)
-        if "> 2 Weeks" in df.columns:
-            styles["> 2 Weeks"] = df["> 2 Weeks"].apply(
-                lambda v: "color: #FFD700; font-weight: bold" if v > 0 else ""
-            )
-        if "> Month" in df.columns:
-            styles["> Month"] = df["> Month"].apply(
-                lambda v: "color: #FF0000; font-weight: bold" if v > 0 else ""
-            )
-        if "Stale (> 1 Wk)" in df.columns:
-            styles["Stale (> 1 Wk)"] = df["Stale (> 1 Wk)"].apply(
-                lambda v: "color: #FFA500; font-weight: bold" if v > 0 else ""
-            )
-        return styles
+        if not detail_df.empty:
+            # display_df = detail_df[["id", "title", "assigned_to", "display_status", "type", "area_path", "created_date", "age_days", "comment_count", "tags"]].copy()
+            # display_df.columns = ["ID", "Title", "Assigned To", "Status", "Type", "Area Path", "Created", "Age (Days)", "Comments", "Tags"]
+            display_df = detail_df[["id", "title", "assigned_to", "display_status", "type", "area_path", "created_date", "age_days", "comment_count"]].copy()
+            display_df.columns = ["ID", "Title", "Assigned To", "Status", "Type", "Area Path", "Created", "Age (Days)", "Comments"]
+            display_df["Created"] = display_df["Created"].dt.strftime("%Y-%m-%d")
 
-    styled_summary = team_summary_df.style.apply(style_aging, axis=None).format({
-        "Avg Days to Complete": lambda x: f"{x:.1f}" if isinstance(x, (int, float)) else x,
-        "Avg Comments/Ticket": lambda x: f"{x:.1f}" if isinstance(x, (int, float)) else x,
-    })
-    st.dataframe(styled_summary, use_container_width=True, hide_index=True)
+            def style_old_rows(row):
+                if row["Age (Days)"] > 30:
+                    return ["color: #FF0000; font-weight: bold"] * len(row)
+                return [""] * len(row)
 
-    # --- Team Ticket Details ---
-    st.divider()
-    st.subheader("Team Ticket Details")
-
-    if team_members:
-        all_members = sorted(set(team_members) & set(filtered["assigned_to"].dropna().unique()))
-    else:
-        all_members = sorted(filtered["assigned_to"].dropna().unique())
-    selected_member = st.selectbox("Select Team Member", ["All"] + list(all_members))
-
-    if selected_member == "All":
-        if team_members:
-            detail_df = filtered[filtered["assigned_to"].isin(team_members)].copy()
+            display_df["ID"] = display_df["ID"].apply(lambda x: f"{org_url}/{project}/_workitems/edit/{x}")
+            styled_detail = display_df.style.apply(style_old_rows, axis=1)
+            st.dataframe(styled_detail, use_container_width=True, hide_index=True,
+                column_config={"ID": st.column_config.LinkColumn(display_text=r"(\d+)$")})
         else:
-            detail_df = filtered.copy()
+            st.info("No active tickets to display.")
+
+        # --- Tickets Not in Designated Areas ---
+        st.divider()
+        st.subheader("Team Tickets Outside Designated Areas")
+
+        active_states = ["New", "Created", "Evaluate", "Approved", "Active", "In Progress"]
+        outside_df = df[
+            (~df["in_designated_area"]) &
+            (df["assigned_to"].isin(team_members)) &
+            (df["state"].isin(active_states))
+        ].copy()
+
+        if not outside_df.empty:
+            outside_df = outside_df.sort_values("age_days", ascending=False)
+            outside_display = outside_df[["id", "title", "assigned_to", "state", "area_path", "created_date", "age_days"]].copy()
+            outside_display.columns = ["ID", "Title", "Assigned To", "Status", "Area Path", "Created", "Age (Days)"]
+            outside_display["Created"] = outside_display["Created"].dt.strftime("%Y-%m-%d")
+            outside_display["ID"] = outside_display["ID"].apply(lambda x: f"{org_url}/{project}/_workitems/edit/{x}")
+            st.dataframe(outside_display, use_container_width=True, hide_index=True,
+                column_config={"ID": st.column_config.LinkColumn(display_text=r"(\d+)$")})
+        else:
+            st.info("No active team tickets outside designated areas.")
+
     else:
-        detail_df = filtered[filtered["assigned_to"] == selected_member].copy()
-
-    state_order = ["New", "Created", "Evaluate", "Approved", "Active", "In Progress", "Blocked"]
-
-    # Filter to only states in state_order
-    detail_df = detail_df[detail_df["state"].isin(state_order)]
-
-    # Combine Active, Approved, In Progress -> "Active"
-    detail_df["display_status"] = detail_df["state"].replace({
-        "Approved": "Active",
-        "In Progress": "Active",
-    })
-
-    # Sort by age descending
-    detail_df = detail_df.sort_values("age_days", ascending=False)
-
-    if not detail_df.empty:
-        # display_df = detail_df[["id", "title", "assigned_to", "display_status", "type", "area_path", "created_date", "age_days", "comment_count", "tags"]].copy()
-        # display_df.columns = ["ID", "Title", "Assigned To", "Status", "Type", "Area Path", "Created", "Age (Days)", "Comments", "Tags"]
-        display_df = detail_df[["id", "title", "assigned_to", "display_status", "type", "area_path", "created_date", "age_days", "comment_count"]].copy()
-        display_df.columns = ["ID", "Title", "Assigned To", "Status", "Type", "Area Path", "Created", "Age (Days)", "Comments"]
-        display_df["Created"] = display_df["Created"].dt.strftime("%Y-%m-%d")
-
-        def style_old_rows(row):
-            if row["Age (Days)"] > 30:
-                return ["color: #FF0000; font-weight: bold"] * len(row)
-            return [""] * len(row)
-
-        display_df["ID"] = display_df["ID"].apply(lambda x: f"{org_url}/{project}/_workitems/edit/{x}")
-        styled_detail = display_df.style.apply(style_old_rows, axis=1)
-        st.dataframe(styled_detail, use_container_width=True, hide_index=True,
-            column_config={"ID": st.column_config.LinkColumn(display_text=r"(\d+)$")})
-    else:
-        st.info("No active tickets to display.")
-
-    # --- Tickets Not in Designated Areas ---
-    st.divider()
-    st.subheader("Team Tickets Outside Designated Areas")
-
-    active_states = ["New", "Created", "Evaluate", "Approved", "Active", "In Progress"]
-    outside_df = df[
-        (~df["in_designated_area"]) &
-        (df["assigned_to"].isin(team_members)) &
-        (df["state"].isin(active_states))
-    ].copy()
-
-    if not outside_df.empty:
-        outside_df = outside_df.sort_values("age_days", ascending=False)
-        outside_display = outside_df[["id", "title", "assigned_to", "state", "area_path", "created_date", "age_days"]].copy()
-        outside_display.columns = ["ID", "Title", "Assigned To", "Status", "Area Path", "Created", "Age (Days)"]
-        outside_display["Created"] = outside_display["Created"].dt.strftime("%Y-%m-%d")
-        outside_display["ID"] = outside_display["ID"].apply(lambda x: f"{org_url}/{project}/_workitems/edit/{x}")
-        st.dataframe(outside_display, use_container_width=True, hide_index=True,
-            column_config={"ID": st.column_config.LinkColumn(display_text=r"(\d+)$")})
-    else:
-        st.info("No active team tickets outside designated areas.")
-
-else:
-    st.info("Sign in with your Microsoft account and select a team to get started.")
+        st.info("Sign in with your Microsoft account and select a team to get started.")

@@ -9,7 +9,8 @@
       "Bash(unzip -l streamlead_zip.zip)",
       "Bash(pip install azure-identity)",
       "Bash(unzip -l /c/streamlead/streamlead_zip.zip)",
-      "Bash(wc -l *.py *.json)"
+      "Bash(wc -l *.py *.json)",
+      "Bash(python -m py_compile app.py)"
     ]
   }
 }
