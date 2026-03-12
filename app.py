@@ -173,6 +173,13 @@ if st.session_state.credential and project and selected_team and selected_team !
     over_2_weeks_count = len(open_for_aging[open_for_aging["age_days"] > 14])
     over_month_count = len(open_for_aging[open_for_aging["age_days"] > 30])
 
+    # Stale KPI (same logic as stale tickets table)
+    open_for_stale = open_for_aging[open_for_aging["assigned_to"].isin(team_members)]
+    stale_count_kpi = len(open_for_stale[
+        (open_for_stale["age_days"] > 7) &
+        ((open_for_stale["days_since_comment"].isna()) | (open_for_stale["days_since_comment"] > 7))
+    ])
+
     # Wrong area count
     wrong_area_count = len(df[
         (~df["in_designated_area"]) &
@@ -188,6 +195,7 @@ if st.session_state.credential and project and selected_team and selected_team !
     ]
 
     all_kpis.append(("Median Days", round(median_days, 1) if pd.notna(median_days) else "N/A"))
+    all_kpis.append(("Stale", stale_count_kpi))
     all_kpis.append(("> 2 Weeks", over_2_weeks_count))
     all_kpis.append(("> Month", over_month_count))
     all_kpis.append(("Wrong Area", wrong_area_count))
