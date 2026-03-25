@@ -331,6 +331,7 @@ with tab_git:
         git_team_config = teams[selected_team]
         git_members = git_team_config.get("members", [])
         git_repos = git_team_config.get("repos", [])
+        git_project = git_team_config.get("repo_project", project)
 
         if not git_repos:
             st.info("No repos configured for this team. Add repo names to the `repos` list in teams.json.")
@@ -345,7 +346,7 @@ with tab_git:
                 st.subheader("Commits")
                 try:
                     commits_df = load_git_commits(
-                        org_url, git_token, project,
+                        org_url, git_token, git_project,
                         tuple(git_repos), tuple(git_members),
                         git_start, git_end,
                     )
@@ -379,7 +380,7 @@ with tab_git:
                 st.subheader("Pull Requests")
                 try:
                     prs_df = load_pull_requests(
-                        org_url, git_token, project,
+                        org_url, git_token, git_project,
                         tuple(git_repos), tuple(git_members),
                         git_start,
                     )
@@ -414,7 +415,7 @@ with tab_git:
             st.divider()
             st.subheader("Pipelines / Deployments")
             try:
-                builds_df = load_builds(org_url, git_token, project, git_start)
+                builds_df = load_builds(org_url, git_token, git_project, git_start)
                 if not builds_df.empty:
                     # Filter to team repos by branch if possible
                     b1, b2, b3 = st.columns(3)
