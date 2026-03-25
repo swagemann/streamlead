@@ -6,6 +6,7 @@ from azure.identity import InteractiveBrowserCredential
 from msrest.authentication import BasicTokenAuthentication
 from azure.devops.v7_0.work_item_tracking.models import Wiql
 from azure.devops.v7_0.work_item_tracking.models import TeamContext
+from azure.devops.v7_0.git.models import GitQueryCommitsCriteria, GitPullRequestSearchCriteria
 
 FIELDS = [
     "System.Id",
@@ -94,6 +95,127 @@ def fetch_work_items(connection, project, wiql_query):
         )
 
     return pd.DataFrame(rows)
+
+
+def fetch_repos(connection, project, repo_names):
+    """Fetch repository objects by name. Returns dict of name -> repo."""
+    try:
+        git_client = connection.clients.get_git_client()
+        all_repos = git_client.get_repositories(project)
+        name_set = set(r.lower() for r in repo_names)
+        return {r.name: r for r in all_repos if r.name.lower() in name_set}
+    except Exception:
+        return {}
+
+
+def fetch_git_commits(connection, project, repo_id, team_members, from_date, to_date):
+    """Fetch commits from a repo filtered by team members and date range."""
+    try:
+        git_client = connection.clients.get_git_client()
+        criteria = GitQueryCommitsCriteria(
+            from_date=from_date,
+            to_date=to_date,
+        )
+        commits = git_client.get_commits(
+            repository_id=repo_id,
+            project=project,
+            search_criteria=criteria,
+            top=1000,
+        )
+        if not commits:
+            return pd.DataFrame(columns=["repo", "commit_id", "author", "date", "message"])
+
+        member_set = set(m.lower() for m in team_members) if team_members else None
+        rows = []
+        for c in commits:
+            author_name = c.author.name if c.author else None
+            if member_set and (not author_name or author_name.lower() not in member_set):
+                continue
+            rows.append({
+                "commit_id": c.commit_id[:8] if c.commit_id else "",
+                "author": author_name or "Unknown",
+                "date": pd.to_datetime(c.author.date) if c.author and c.author.date else None,
+                "message": (c.comment or "").split("\n")[0][:120],
+            })
+        return pd.DataFrame(rows)
+    except Exception:
+        return pd.DataFrame(columns=["commit_id", "author", "date", "message"])
+
+
+def fetch_pull_requests(connection, project, repo_id, team_members, from_date=None):
+    """Fetch pull requests from a repo."""
+    try:
+        git_client = connection.clients.get_git_client()
+        criteria = GitPullRequestSearchCriteria(status="all")
+        prs = git_client.get_pull_requests(
+            repository_id=repo_id,
+            project=project,
+            search_criteria=criteria,
+            top=200,
+        )
+        if not prs:
+            return pd.DataFrame(columns=["pr_id", "title", "author", "status", "created", "closed", "reviewers"])
+
+        member_set = set(m.lower() for m in team_members) if team_members else None
+        from_dt = pd.to_datetime(from_date) if from_date else None
+        rows = []
+        for pr in prs:
+            created = pd.to_datetime(pr.creation_date) if pr.creation_date else None
+            if from_dt and created and created < from_dt:
+                continue
+
+            author_name = pr.created_by.display_name if pr.created_by else None
+            if member_set and (not author_name or author_name.lower() not in member_set):
+                continue
+
+            status_map = {1: "Active", 2: "Abandoned", 3: "Completed"}
+            status = status_map.get(pr.status, str(pr.status)) if isinstance(pr.status, int) else str(pr.status or "")
+
+            reviewers = ", ".join(
+                r.display_name for r in (pr.reviewers or []) if r.display_name
+            )
+
+            rows.append({
+                "pr_id": pr.pull_request_id,
+                "title": pr.title or "",
+                "author": author_name or "Unknown",
+                "status": status,
+                "created": created,
+                "closed": pd.to_datetime(pr.closed_date) if pr.closed_date else None,
+                "reviewers": reviewers,
+            })
+        return pd.DataFrame(rows)
+    except Exception:
+        return pd.DataFrame(columns=["pr_id", "title", "author", "status", "created", "closed", "reviewers"])
+
+
+def fetch_builds(connection, project, from_date=None):
+    """Fetch build/pipeline runs."""
+    try:
+        build_client = connection.clients.get_build_client()
+        builds = build_client.get_builds(
+            project=project,
+            min_time=from_date,
+            top=200,
+        )
+        if not builds:
+            return pd.DataFrame(columns=["build_id", "pipeline", "status", "result", "requested_by", "start_time", "finish_time", "branch"])
+
+        rows = []
+        for b in builds:
+            rows.append({
+                "build_id": b.id,
+                "pipeline": b.definition.name if b.definition else "",
+                "status": str(b.status or ""),
+                "result": str(b.result or ""),
+                "requested_by": b.requested_by.display_name if b.requested_by else "",
+                "start_time": pd.to_datetime(b.start_time) if b.start_time else None,
+                "finish_time": pd.to_datetime(b.finish_time) if b.finish_time else None,
+                "branch": (b.source_branch or "").replace("refs/heads/", ""),
+            })
+        return pd.DataFrame(rows)
+    except Exception:
+        return pd.DataFrame(columns=["build_id", "pipeline", "status", "result", "requested_by", "start_time", "finish_time", "branch"])
 
 
 def fetch_last_team_comment_dates(connection, project, work_item_ids, team_members):

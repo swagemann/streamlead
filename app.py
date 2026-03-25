@@ -3,7 +3,11 @@ import streamlit as st
 import plotly.express as px
 import pandas as pd
 import os
-from ado_client import get_credential, get_ado_connection, fetch_work_items, fetch_last_team_comment_dates, ADO_SCOPE
+from ado_client import (
+    get_credential, get_ado_connection, fetch_work_items,
+    fetch_last_team_comment_dates, fetch_repos, fetch_git_commits,
+    fetch_pull_requests, fetch_builds, ADO_SCOPE,
+)
 from teams import load_teams
 
 st.set_page_config(page_title="ADO Dashboard", layout="wide")
@@ -90,9 +94,54 @@ def load_comment_dates(org_url, token, project, work_item_ids, team_members):
     return fetch_last_team_comment_dates(conn, project, work_item_ids, team_members)
 
 
+@st.cache_data(ttl=300)
+def load_git_commits(org_url, token, project, repo_names, members, start_date, end_date):
+    try:
+        conn = get_ado_connection(org_url, token)
+        repos = fetch_repos(conn, project, list(repo_names))
+        if not repos:
+            return pd.DataFrame(columns=["repo", "commit_id", "author", "date", "message"])
+        all_dfs = []
+        for name, repo in repos.items():
+            df = fetch_git_commits(conn, project, repo.id, list(members), start_date, end_date)
+            if not df.empty:
+                df["repo"] = name
+                all_dfs.append(df)
+        return pd.concat(all_dfs, ignore_index=True) if all_dfs else pd.DataFrame(columns=["repo", "commit_id", "author", "date", "message"])
+    except Exception:
+        return pd.DataFrame(columns=["repo", "commit_id", "author", "date", "message"])
+
+
+@st.cache_data(ttl=300)
+def load_pull_requests(org_url, token, project, repo_names, members, start_date):
+    try:
+        conn = get_ado_connection(org_url, token)
+        repos = fetch_repos(conn, project, list(repo_names))
+        if not repos:
+            return pd.DataFrame(columns=["repo", "pr_id", "title", "author", "status", "created", "closed", "reviewers"])
+        all_dfs = []
+        for name, repo in repos.items():
+            df = fetch_pull_requests(conn, project, repo.id, list(members), start_date)
+            if not df.empty:
+                df["repo"] = name
+                all_dfs.append(df)
+        return pd.concat(all_dfs, ignore_index=True) if all_dfs else pd.DataFrame(columns=["repo", "pr_id", "title", "author", "status", "created", "closed", "reviewers"])
+    except Exception:
+        return pd.DataFrame(columns=["repo", "pr_id", "title", "author", "status", "created", "closed", "reviewers"])
+
+
+@st.cache_data(ttl=300)
+def load_builds(org_url, token, project, start_date):
+    try:
+        conn = get_ado_connection(org_url, token)
+        return fetch_builds(conn, project, start_date)
+    except Exception:
+        return pd.DataFrame(columns=["build_id", "pipeline", "status", "result", "requested_by", "start_time", "finish_time", "branch"])
+
+
 st.title(f"Management Dashboard: {selected_team}")
 
-tab_dashboard, tab_report, tab_docs = st.tabs(["Dashboard", "Summary Report", "Docs"])
+tab_dashboard, tab_git, tab_report, tab_docs = st.tabs(["Dashboard", "Git & Deployments", "Summary Report", "Docs"])
 
 with tab_docs:
     docs_path = os.path.join(os.path.dirname(__file__), "ado-ticket-guidelines.md")
@@ -279,6 +328,116 @@ Write the report now."""
                 st.info("No closed or active tickets found for team members in the last 3 weeks.")
         else:
             st.info("No work items found for the last 3 weeks.")
+    else:
+        st.info("Sign in with your Microsoft account and select a team to get started.")
+
+with tab_git:
+    if st.session_state.credential and project and selected_team and selected_team != "(No teams configured)":
+        git_token = st.session_state.credential.get_token(ADO_SCOPE).token
+        git_team_config = teams[selected_team]
+        git_members = git_team_config.get("members", [])
+        git_repos = git_team_config.get("repos", [])
+
+        if not git_repos:
+            st.info("No repos configured for this team. Add repo names to the `repos` list in teams.json.")
+        else:
+            git_start = str(date_range[0])
+            git_end = str(date_range[1])
+
+            col_commits, col_prs = st.columns(2)
+
+            # --- Commits ---
+            with col_commits:
+                st.subheader("Commits")
+                try:
+                    commits_df = load_git_commits(
+                        org_url, git_token, project,
+                        tuple(git_repos), tuple(git_members),
+                        git_start, git_end,
+                    )
+                    if not commits_df.empty:
+                        # Summary metrics
+                        c1, c2 = st.columns(2)
+                        c1.metric("Total Commits", len(commits_df))
+                        c2.metric("Contributors", commits_df["author"].nunique())
+
+                        # Commits by author
+                        if len(commits_df) > 0:
+                            author_counts = commits_df["author"].value_counts().reset_index()
+                            author_counts.columns = ["Author", "Commits"]
+                            fig_commits = px.bar(author_counts, x="Author", y="Commits", color="Author")
+                            fig_commits.update_layout(showlegend=False)
+                            st.plotly_chart(fig_commits, use_container_width=True)
+
+                        # Recent commits table
+                        st.markdown("**Recent Commits**")
+                        display_commits = commits_df[["repo", "commit_id", "author", "date", "message"]].copy()
+                        display_commits["date"] = display_commits["date"].dt.strftime("%Y-%m-%d %H:%M")
+                        display_commits.columns = ["Repo", "SHA", "Author", "Date", "Message"]
+                        st.dataframe(display_commits.head(50), use_container_width=True, hide_index=True)
+                    else:
+                        st.info("No commits found for the selected date range and team members.")
+                except Exception as e:
+                    st.warning(f"Could not load commits: {e}")
+
+            # --- Pull Requests ---
+            with col_prs:
+                st.subheader("Pull Requests")
+                try:
+                    prs_df = load_pull_requests(
+                        org_url, git_token, project,
+                        tuple(git_repos), tuple(git_members),
+                        git_start,
+                    )
+                    if not prs_df.empty:
+                        # Summary metrics
+                        p1, p2, p3 = st.columns(3)
+                        p1.metric("Total PRs", len(prs_df))
+                        completed = len(prs_df[prs_df["status"] == "Completed"])
+                        active = len(prs_df[prs_df["status"] == "Active"])
+                        p2.metric("Completed", completed)
+                        p3.metric("Active", active)
+
+                        # PRs by author
+                        pr_author_counts = prs_df["author"].value_counts().reset_index()
+                        pr_author_counts.columns = ["Author", "PRs"]
+                        fig_prs = px.bar(pr_author_counts, x="Author", y="PRs", color="Author")
+                        fig_prs.update_layout(showlegend=False)
+                        st.plotly_chart(fig_prs, use_container_width=True)
+
+                        # PR table
+                        st.markdown("**Pull Requests**")
+                        display_prs = prs_df[["repo", "pr_id", "title", "author", "status", "created", "reviewers"]].copy()
+                        display_prs["created"] = display_prs["created"].dt.strftime("%Y-%m-%d")
+                        display_prs.columns = ["Repo", "ID", "Title", "Author", "Status", "Created", "Reviewers"]
+                        st.dataframe(display_prs.head(50), use_container_width=True, hide_index=True)
+                    else:
+                        st.info("No pull requests found for the selected date range and team members.")
+                except Exception as e:
+                    st.warning(f"Could not load pull requests: {e}")
+
+            # --- Builds / Deployments ---
+            st.divider()
+            st.subheader("Pipelines / Deployments")
+            try:
+                builds_df = load_builds(org_url, git_token, project, git_start)
+                if not builds_df.empty:
+                    # Filter to team repos by branch if possible
+                    b1, b2, b3 = st.columns(3)
+                    b1.metric("Total Runs", len(builds_df))
+                    succeeded = len(builds_df[builds_df["result"].str.lower() == "succeeded"])
+                    failed = len(builds_df[builds_df["result"].str.lower() == "failed"])
+                    b2.metric("Succeeded", succeeded)
+                    b3.metric("Failed", failed)
+
+                    display_builds = builds_df[["build_id", "pipeline", "result", "requested_by", "start_time", "branch"]].copy()
+                    display_builds["start_time"] = display_builds["start_time"].dt.strftime("%Y-%m-%d %H:%M")
+                    display_builds.columns = ["ID", "Pipeline", "Result", "Requested By", "Started", "Branch"]
+                    st.dataframe(display_builds.head(50), use_container_width=True, hide_index=True)
+                else:
+                    st.info("No pipeline runs found for the selected date range.")
+            except Exception as e:
+                st.warning(f"Could not load pipeline data: {e}")
     else:
         st.info("Sign in with your Microsoft account and select a team to get started.")
 
