@@ -375,7 +375,7 @@ with tab_git:
         if not git_repos:
             st.info("No repos configured for this team. Add repo names to the `repos` list in teams.json.")
         else:
-            git_start = str(date_range[0])
+            git_start = pd.Timestamp(date_range[0]).isoformat()
             git_end = str(date_range[1])
 
             col_commits, col_prs = st.columns(2)
@@ -603,8 +603,8 @@ with tab_dashboard:
 
         # --- Tickets Over Time (Bar Chart, full width) ---
         st.subheader("Tickets Over Time (Created vs Closed)")
-        range_start = pd.Timestamp(date_range[0])
-        range_end = pd.Timestamp(date_range[1])
+        range_start = pd.Timestamp(date_range[0], tz="UTC")
+        range_end = pd.Timestamp(date_range[1], tz="UTC")
         chart_created = filtered[filtered["created_date"].between(range_start, range_end)]
         chart_closed = filtered.dropna(subset=["closed_date"])
         chart_closed = chart_closed[chart_closed["closed_date"].between(range_start, range_end)]
