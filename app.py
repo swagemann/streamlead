@@ -109,7 +109,7 @@ with tab_report:
         team_members_r = team_config_r.get("members", [])
         team_areas_r = team_config_r.get("areas", [])
 
-        report_end = pd.Timestamp.now()
+        report_end = pd.Timestamp.now(tz="UTC")
         report_start = report_end - pd.Timedelta(weeks=3)
 
         report_df = load_data(
