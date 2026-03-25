@@ -154,6 +154,29 @@ with tab_report:
 
         report_end = pd.Timestamp.now(tz="UTC")
         report_start = report_end - pd.Timedelta(weeks=3)
+        team_repos_r = team_config_r.get("repos", [])
+        repo_project_r = team_config_r.get("repo_project", project)
+
+        # Load git stats for the report period
+        report_commits_df = pd.DataFrame()
+        report_prs_df = pd.DataFrame()
+        if team_repos_r:
+            try:
+                report_commits_df = load_git_commits(
+                    org_url, report_token, repo_project_r,
+                    tuple(team_repos_r), tuple(team_members_r),
+                    str(report_start.date()), str(report_end.date()),
+                )
+            except Exception:
+                report_commits_df = pd.DataFrame()
+            try:
+                report_prs_df = load_pull_requests(
+                    org_url, report_token, repo_project_r,
+                    tuple(team_repos_r), tuple(team_members_r),
+                    str(report_start.date()),
+                )
+            except Exception:
+                report_prs_df = pd.DataFrame()
 
         report_df = load_data(
             org_url, report_token, project,
@@ -227,12 +250,27 @@ with tab_report:
                     for area, grp in other_active.groupby("display_area"):
                         active_groups[area] = grp[["title", "type"]].to_dict("records")
 
+                # Git stats for this member
+                m_commits = 0
+                m_prs_completed = 0
+                m_prs_active = 0
+                if not report_commits_df.empty:
+                    m_commits_df = report_commits_df[report_commits_df["author"].str.contains(member.split()[0], case=False, na=False)]
+                    m_commits = len(m_commits_df)
+                if not report_prs_df.empty:
+                    m_prs_df = report_prs_df[report_prs_df["author"].str.contains(member.split()[0], case=False, na=False)]
+                    m_prs_completed = len(m_prs_df[m_prs_df["status"] == "Completed"])
+                    m_prs_active = len(m_prs_df[m_prs_df["status"] == "Active"])
+
                 report_persons.append({
                     "name": member,
                     "closed": total_closed,
                     "comments": total_comments,
                     "closed_groups": closed_groups,
                     "active_groups": active_groups,
+                    "commits": m_commits,
+                    "prs_completed": m_prs_completed,
+                    "prs_active": m_prs_active,
                 })
 
             if report_persons:
@@ -263,7 +301,8 @@ with tab_report:
                     data_block = ""
                     for person in persons:
                         data_block += f"\n### {person['name']}\n"
-                        data_block += f"Tickets closed: {person['closed']} | Total comments: {person['comments']}\n"
+                        data_block += f"Tickets closed: {person['closed']} | Total comments: {person['comments']}"
+                        data_block += f" | Commits: {person['commits']} | PRs completed: {person['prs_completed']} | PRs active: {person['prs_active']}\n"
 
                         if person["closed_groups"]:
                             data_block += "\nCOMPLETED WORK:\n"
@@ -292,8 +331,8 @@ FORMAT REQUIREMENTS:
 - Title: "{team_name} — Work Summary" with the date range below it
 - One section per team member with their name as the heading
 - Under each person: a short narrative paragraph (2-4 sentences) summarizing what they accomplished and what they're currently working on. Group related tickets into themes rather than listing every ticket individually. Anything tagged FleetTrack should be described under a "FleetTrack" sub-topic.
-- After the narrative, include a compact stats line: "X tickets closed | Y comments"
-- End with a brief 1-2 sentence team-level summary noting overall throughput and any cross-cutting themes.
+- After the narrative, include a compact stats line: "X tickets closed | Y comments | Z commits | N PRs merged"
+- End with a brief 1-2 sentence team-level summary noting overall throughput, code contributions, and any cross-cutting themes.
 - Do NOT use bullet points for the narrative — use flowing prose. Keep it scannable but polished.
 - Do NOT fabricate details. Only describe what the ticket titles suggest.
 
@@ -564,10 +603,14 @@ with tab_dashboard:
 
         # --- Tickets Over Time (Bar Chart, full width) ---
         st.subheader("Tickets Over Time (Created vs Closed)")
-        created_ts = (filtered.set_index("created_date")
+        range_start = pd.Timestamp(date_range[0])
+        range_end = pd.Timestamp(date_range[1])
+        chart_created = filtered[filtered["created_date"].between(range_start, range_end)]
+        chart_closed = filtered.dropna(subset=["closed_date"])
+        chart_closed = chart_closed[chart_closed["closed_date"].between(range_start, range_end)]
+        created_ts = (chart_created.set_index("created_date")
                       .resample("W").size().reset_index(name="created"))
-        closed_ts = (filtered.dropna(subset=["closed_date"])
-                     .set_index("closed_date")
+        closed_ts = (chart_closed.set_index("closed_date")
                      .resample("W").size().reset_index(name="closed"))
         ts = created_ts.merge(closed_ts, left_on="created_date",
                               right_on="closed_date", how="outer").fillna(0)

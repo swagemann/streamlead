@@ -173,10 +173,10 @@ def fetch_pull_requests(connection, project, repo_id, team_members, from_date=No
             return pd.DataFrame(columns=["pr_id", "title", "author", "status", "created", "closed", "reviewers"])
 
         member_lower = [m.lower() for m in team_members] if team_members else None
-        from_dt = pd.to_datetime(from_date) if from_date else None
+        from_dt = pd.to_datetime(from_date, utc=True) if from_date else None
         rows = []
         for pr in prs:
-            created = pd.to_datetime(pr.creation_date) if pr.creation_date else None
+            created = pd.to_datetime(pr.creation_date, utc=True) if pr.creation_date else None
             if from_dt and created and created < from_dt:
                 continue
 
@@ -201,7 +201,7 @@ def fetch_pull_requests(connection, project, repo_id, team_members, from_date=No
                 "author": author_name or "Unknown",
                 "status": status,
                 "created": created,
-                "closed": pd.to_datetime(pr.closed_date) if pr.closed_date else None,
+                "closed": pd.to_datetime(pr.closed_date, utc=True) if pr.closed_date else None,
                 "reviewers": reviewers,
             })
         return pd.DataFrame(rows)
