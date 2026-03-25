@@ -1,6 +1,9 @@
 # ado_client.py
+import logging
 import re
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 from azure.devops.connection import Connection
 from azure.identity import InteractiveBrowserCredential
 from msrest.authentication import BasicTokenAuthentication
@@ -103,9 +106,14 @@ def fetch_repos(connection, project, repo_names):
         git_client = connection.clients.get_git_client()
         all_repos = git_client.get_repositories(project)
         name_set = set(r.lower() for r in repo_names)
-        return {r.name: r for r in all_repos if r.name.lower() in name_set}
-    except Exception:
-        return {}
+        matched = {r.name: r for r in all_repos if r.name.lower() in name_set}
+        if not matched:
+            available = [r.name for r in all_repos]
+            logger.warning(f"No repos matched {repo_names}. Available repos: {available}")
+        return matched
+    except Exception as e:
+        logger.error(f"fetch_repos failed: {e}")
+        raise
 
 
 def fetch_git_commits(connection, project, repo_id, team_members, from_date, to_date):
@@ -125,11 +133,18 @@ def fetch_git_commits(connection, project, repo_id, team_members, from_date, to_
         if not commits:
             return pd.DataFrame(columns=["repo", "commit_id", "author", "date", "message"])
 
-        member_set = set(m.lower() for m in team_members) if team_members else None
+        # Git author names may differ from ADO display names, so use
+        # case-insensitive substring matching (e.g. "Jevan" matches
+        # "Jevan Choo Quan" in either direction).
+        member_lower = [m.lower() for m in team_members] if team_members else None
         rows = []
         for c in commits:
             author_name = c.author.name if c.author else None
-            if member_set and (not author_name or author_name.lower() not in member_set):
+            if member_lower and author_name:
+                name_l = author_name.lower()
+                if not any(m in name_l or name_l in m for m in member_lower):
+                    continue
+            elif member_lower and not author_name:
                 continue
             rows.append({
                 "commit_id": c.commit_id[:8] if c.commit_id else "",
@@ -138,8 +153,9 @@ def fetch_git_commits(connection, project, repo_id, team_members, from_date, to_
                 "message": (c.comment or "").split("\n")[0][:120],
             })
         return pd.DataFrame(rows)
-    except Exception:
-        return pd.DataFrame(columns=["commit_id", "author", "date", "message"])
+    except Exception as e:
+        logger.error(f"fetch_git_commits failed: {e}")
+        raise
 
 
 def fetch_pull_requests(connection, project, repo_id, team_members, from_date=None):
@@ -156,7 +172,7 @@ def fetch_pull_requests(connection, project, repo_id, team_members, from_date=No
         if not prs:
             return pd.DataFrame(columns=["pr_id", "title", "author", "status", "created", "closed", "reviewers"])
 
-        member_set = set(m.lower() for m in team_members) if team_members else None
+        member_lower = [m.lower() for m in team_members] if team_members else None
         from_dt = pd.to_datetime(from_date) if from_date else None
         rows = []
         for pr in prs:
@@ -165,7 +181,11 @@ def fetch_pull_requests(connection, project, repo_id, team_members, from_date=No
                 continue
 
             author_name = pr.created_by.display_name if pr.created_by else None
-            if member_set and (not author_name or author_name.lower() not in member_set):
+            if member_lower and author_name:
+                name_l = author_name.lower()
+                if not any(m in name_l or name_l in m for m in member_lower):
+                    continue
+            elif member_lower and not author_name:
                 continue
 
             status_map = {1: "Active", 2: "Abandoned", 3: "Completed"}
@@ -185,8 +205,9 @@ def fetch_pull_requests(connection, project, repo_id, team_members, from_date=No
                 "reviewers": reviewers,
             })
         return pd.DataFrame(rows)
-    except Exception:
-        return pd.DataFrame(columns=["pr_id", "title", "author", "status", "created", "closed", "reviewers"])
+    except Exception as e:
+        logger.error(f"fetch_pull_requests failed: {e}")
+        raise
 
 
 def fetch_builds(connection, project, from_date=None):
@@ -214,8 +235,9 @@ def fetch_builds(connection, project, from_date=None):
                 "branch": (b.source_branch or "").replace("refs/heads/", ""),
             })
         return pd.DataFrame(rows)
-    except Exception:
-        return pd.DataFrame(columns=["build_id", "pipeline", "status", "result", "requested_by", "start_time", "finish_time", "branch"])
+    except Exception as e:
+        logger.error(f"fetch_builds failed: {e}")
+        raise
 
 
 def fetch_last_team_comment_dates(connection, project, work_item_ids, team_members):

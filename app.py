@@ -81,8 +81,11 @@ def load_data(org_url, token, project, start_date, end_date, area_paths, members
         SELECT [System.Id] FROM WorkItems
         WHERE [System.TeamProject] = '{project}'
         AND ({combined})
-        AND [System.CreatedDate] >= '{start_date}'
-        AND [System.CreatedDate] <= '{end_date}'
+        AND (
+            ([System.CreatedDate] >= '{start_date}' AND [System.CreatedDate] <= '{end_date}')
+            OR
+            ([Microsoft.VSTS.Common.ClosedDate] >= '{start_date}' AND [Microsoft.VSTS.Common.ClosedDate] <= '{end_date}')
+        )
         ORDER BY [System.CreatedDate] DESC
     """
     return fetch_work_items(conn, project, wiql)
@@ -96,47 +99,38 @@ def load_comment_dates(org_url, token, project, work_item_ids, team_members):
 
 @st.cache_data(ttl=300)
 def load_git_commits(org_url, token, project, repo_names, members, start_date, end_date):
-    try:
-        conn = get_ado_connection(org_url, token)
-        repos = fetch_repos(conn, project, list(repo_names))
-        if not repos:
-            return pd.DataFrame(columns=["repo", "commit_id", "author", "date", "message"])
-        all_dfs = []
-        for name, repo in repos.items():
-            df = fetch_git_commits(conn, project, repo.id, list(members), start_date, end_date)
-            if not df.empty:
-                df["repo"] = name
-                all_dfs.append(df)
-        return pd.concat(all_dfs, ignore_index=True) if all_dfs else pd.DataFrame(columns=["repo", "commit_id", "author", "date", "message"])
-    except Exception:
-        return pd.DataFrame(columns=["repo", "commit_id", "author", "date", "message"])
+    conn = get_ado_connection(org_url, token)
+    repos = fetch_repos(conn, project, list(repo_names))
+    if not repos:
+        raise ValueError(f"No repos matched names: {list(repo_names)}. Check that the repo names in teams.json match Azure DevOps exactly.")
+    all_dfs = []
+    for name, repo in repos.items():
+        df = fetch_git_commits(conn, project, repo.id, list(members), start_date, end_date)
+        if not df.empty:
+            df["repo"] = name
+            all_dfs.append(df)
+    return pd.concat(all_dfs, ignore_index=True) if all_dfs else pd.DataFrame(columns=["repo", "commit_id", "author", "date", "message"])
 
 
 @st.cache_data(ttl=300)
 def load_pull_requests(org_url, token, project, repo_names, members, start_date):
-    try:
-        conn = get_ado_connection(org_url, token)
-        repos = fetch_repos(conn, project, list(repo_names))
-        if not repos:
-            return pd.DataFrame(columns=["repo", "pr_id", "title", "author", "status", "created", "closed", "reviewers"])
-        all_dfs = []
-        for name, repo in repos.items():
-            df = fetch_pull_requests(conn, project, repo.id, list(members), start_date)
-            if not df.empty:
-                df["repo"] = name
-                all_dfs.append(df)
-        return pd.concat(all_dfs, ignore_index=True) if all_dfs else pd.DataFrame(columns=["repo", "pr_id", "title", "author", "status", "created", "closed", "reviewers"])
-    except Exception:
-        return pd.DataFrame(columns=["repo", "pr_id", "title", "author", "status", "created", "closed", "reviewers"])
+    conn = get_ado_connection(org_url, token)
+    repos = fetch_repos(conn, project, list(repo_names))
+    if not repos:
+        raise ValueError(f"No repos matched names: {list(repo_names)}. Check that the repo names in teams.json match Azure DevOps exactly.")
+    all_dfs = []
+    for name, repo in repos.items():
+        df = fetch_pull_requests(conn, project, repo.id, list(members), start_date)
+        if not df.empty:
+            df["repo"] = name
+            all_dfs.append(df)
+    return pd.concat(all_dfs, ignore_index=True) if all_dfs else pd.DataFrame(columns=["repo", "pr_id", "title", "author", "status", "created", "closed", "reviewers"])
 
 
 @st.cache_data(ttl=300)
 def load_builds(org_url, token, project, start_date):
-    try:
-        conn = get_ado_connection(org_url, token)
-        return fetch_builds(conn, project, start_date)
-    except Exception:
-        return pd.DataFrame(columns=["build_id", "pipeline", "status", "result", "requested_by", "start_time", "finish_time", "branch"])
+    conn = get_ado_connection(org_url, token)
+    return fetch_builds(conn, project, start_date)
 
 
 st.title(f"Management Dashboard: {selected_team}")
