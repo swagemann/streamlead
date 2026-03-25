@@ -69,6 +69,7 @@ def load_data(org_url, token, project, start_date, end_date, area_paths, members
             "id", "state", "assigned_to", "type",
             "created_date", "closed_date",
             "area_path", "title", "tags", "comment_count",
+            "board_lane",
         ])
 
     combined = " OR ".join(clauses)
@@ -91,7 +92,7 @@ def load_comment_dates(org_url, token, project, work_item_ids, team_members):
 
 st.title(f"Management Dashboard: {selected_team}")
 
-tab_dashboard, tab_docs = st.tabs(["Dashboard", "Docs"])
+tab_dashboard, tab_report, tab_docs = st.tabs(["Dashboard", "Summary Report", "Docs"])
 
 with tab_docs:
     docs_path = os.path.join(os.path.dirname(__file__), "ado-ticket-guidelines.md")
@@ -100,6 +101,184 @@ with tab_docs:
             st.markdown(f.read())
     else:
         st.warning("Documentation file not found.")
+
+with tab_report:
+    if st.session_state.credential and project and selected_team and selected_team != "(No teams configured)":
+        report_token = st.session_state.credential.get_token(ADO_SCOPE).token
+        team_config_r = teams[selected_team]
+        team_members_r = team_config_r.get("members", [])
+        team_areas_r = team_config_r.get("areas", [])
+
+        report_end = pd.Timestamp.now()
+        report_start = report_end - pd.Timedelta(weeks=3)
+
+        report_df = load_data(
+            org_url, report_token, project,
+            str(report_start.date()), str(report_end.date()),
+            tuple(team_areas_r), tuple(team_members_r)
+        )
+
+        if not report_df.empty:
+            # Enrich data
+            report_df["tags_list"] = report_df["tags"].apply(
+                lambda t: [x.strip() for x in t.split(";") if x.strip()] if t else []
+            )
+            report_df["display_area"] = report_df["area_path"].apply(
+                lambda p: p.split("\\")[-1] if p else "Unknown"
+            )
+            report_df["is_fleettrack"] = report_df["tags_list"].apply(lambda t: "Fleet Track" in t)
+
+            closed_states = ["Closed", "Resolved", "Done", "Complete"]
+            closed_df = report_df[
+                (report_df["state"].isin(closed_states)) &
+                (report_df["closed_date"] >= report_start) &
+                (report_df["assigned_to"].isin(team_members_r))
+            ]
+
+            # Also gather active/in-progress tickets for context
+            active_states = ["Approved", "Active", "In Progress"]
+            active_df = report_df[
+                (report_df["state"].isin(active_states)) &
+                (report_df["assigned_to"].isin(team_members_r))
+            ]
+
+            period_label = f"{report_start.strftime('%B %d')} – {report_end.strftime('%B %d, %Y')}"
+            st.markdown(f"### {selected_team} — Summary Report Generator")
+            st.caption(period_label)
+            st.markdown(
+                "This tab builds an AI prompt from your team's ticket data. "
+                "Copy it into Claude / ChatGPT and get a polished report back instantly."
+            )
+
+            # Build per-person report data
+            report_persons = []
+            for member in sorted(team_members_r):
+                m_closed = closed_df[closed_df["assigned_to"] == member]
+                m_active = active_df[active_df["assigned_to"] == member]
+
+                if m_closed.empty and m_active.empty:
+                    continue
+
+                total_closed = len(m_closed)
+                total_comments = int(m_closed["comment_count"].sum()) if not m_closed.empty else 0
+
+                # Group closed: FleetTrack vs other areas
+                ft_closed = m_closed[m_closed["is_fleettrack"]] if not m_closed.empty else pd.DataFrame()
+                other_closed = m_closed[~m_closed["is_fleettrack"]] if not m_closed.empty else pd.DataFrame()
+
+                closed_groups = {}
+                if not ft_closed.empty:
+                    closed_groups["FleetTrack"] = ft_closed[["title", "type"]].to_dict("records")
+                for area, grp in other_closed.groupby("display_area"):
+                    closed_groups[area] = grp[["title", "type"]].to_dict("records")
+
+                # Group active: FleetTrack vs other areas
+                ft_active = m_active[m_active["is_fleettrack"]] if not m_active.empty else pd.DataFrame()
+                other_active = m_active[~m_active["is_fleettrack"]] if not m_active.empty else pd.DataFrame()
+
+                active_groups = {}
+                if not ft_active.empty:
+                    active_groups["FleetTrack"] = ft_active[["title", "type"]].to_dict("records")
+                for area, grp in other_active.groupby("display_area"):
+                    active_groups[area] = grp[["title", "type"]].to_dict("records")
+
+                report_persons.append({
+                    "name": member,
+                    "closed": total_closed,
+                    "comments": total_comments,
+                    "closed_groups": closed_groups,
+                    "active_groups": active_groups,
+                })
+
+            if report_persons:
+                # --- Preview the raw data in the tab ---
+                for person in report_persons:
+                    st.markdown("---")
+                    st.markdown(f"#### {person['name']}")
+                    col_a, col_b = st.columns(2)
+                    col_a.metric("Tickets Closed", person["closed"])
+                    col_b.metric("Total Comments", person["comments"])
+
+                    if person["closed_groups"]:
+                        st.markdown("**Completed**")
+                        for area_name, tickets in person["closed_groups"].items():
+                            st.markdown(f"*{area_name}* — {len(tickets)} ticket{'s' if len(tickets) != 1 else ''}")
+                            for t in tickets:
+                                st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;• {t['title']}  `{t['type']}`")
+
+                    if person["active_groups"]:
+                        st.markdown("**In Progress**")
+                        for area_name, tickets in person["active_groups"].items():
+                            st.markdown(f"*{area_name}* — {len(tickets)} ticket{'s' if len(tickets) != 1 else ''}")
+                            for t in tickets:
+                                st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;• {t['title']}  `{t['type']}`")
+
+                # --- Build the AI prompt ---
+                def build_ai_prompt(persons, team_name, period):
+                    data_block = ""
+                    for person in persons:
+                        data_block += f"\n### {person['name']}\n"
+                        data_block += f"Tickets closed: {person['closed']} | Total comments: {person['comments']}\n"
+
+                        if person["closed_groups"]:
+                            data_block += "\nCOMPLETED WORK:\n"
+                            for area_name, tickets in person["closed_groups"].items():
+                                data_block += f"  [{area_name}]\n"
+                                for t in tickets:
+                                    data_block += f"    - ({t['type']}) {t['title']}\n"
+
+                        if person["active_groups"]:
+                            data_block += "\nCURRENTLY IN PROGRESS:\n"
+                            for area_name, tickets in person["active_groups"].items():
+                                data_block += f"  [{area_name}]\n"
+                                for t in tickets:
+                                    data_block += f"    - ({t['type']}) {t['title']}\n"
+
+                    prompt = f"""You are a technical writing assistant. Write a professional work summary report for my manager.
+
+REPORT PARAMETERS:
+- Team: {team_name}
+- Period: {period}
+- Audience: Senior management (non-technical — keep it clear and concise)
+- Length: Roughly one page when printed
+- Tone: Professional, confident, factual
+
+FORMAT REQUIREMENTS:
+- Title: "{team_name} — Work Summary" with the date range below it
+- One section per team member with their name as the heading
+- Under each person: a short narrative paragraph (2-4 sentences) summarizing what they accomplished and what they're currently working on. Group related tickets into themes rather than listing every ticket individually. Anything tagged FleetTrack should be described under a "FleetTrack" sub-topic.
+- After the narrative, include a compact stats line: "X tickets closed | Y comments"
+- End with a brief 1-2 sentence team-level summary noting overall throughput and any cross-cutting themes.
+- Do NOT use bullet points for the narrative — use flowing prose. Keep it scannable but polished.
+- Do NOT fabricate details. Only describe what the ticket titles suggest.
+
+RAW TICKET DATA:
+{data_block}
+
+Write the report now."""
+                    return prompt
+
+                prompt_text = build_ai_prompt(report_persons, selected_team, period_label)
+
+                st.markdown("---")
+                st.markdown("#### AI Prompt")
+                st.caption("Copy this prompt and paste it into Claude, ChatGPT, or any AI to generate your polished report.")
+
+                st.code(prompt_text, language=None)
+
+                # Copy-friendly download as .txt
+                st.download_button(
+                    label="Download Prompt (.txt)",
+                    data=prompt_text,
+                    file_name=f"{selected_team.lower().replace(' ', '_')}_prompt_{report_end.strftime('%Y%m%d')}.txt",
+                    mime="text/plain",
+                )
+            else:
+                st.info("No closed or active tickets found for team members in the last 3 weeks.")
+        else:
+            st.info("No work items found for the last 3 weeks.")
+    else:
+        st.info("Sign in with your Microsoft account and select a team to get started.")
 
 with tab_dashboard:
     if st.session_state.credential and project and selected_team and selected_team != "(No teams configured)":
@@ -180,8 +359,9 @@ with tab_dashboard:
         active_tickets = len(filtered[filtered["state"].isin(["Approved", "Active", "In Progress", "New", "Created", "Evaluate"])])
         closed_tickets = len(closed_items)
 
-        # Aging KPIs
-        open_for_aging = filtered[~filtered["state"].isin(["Closed", "Resolved", "Done", "Complete"])]
+        # Aging KPIs (exclude Backlog swim lane)
+        non_closed = filtered[~filtered["state"].isin(["Closed", "Resolved", "Done", "Complete"])]
+        open_for_aging = non_closed[non_closed["board_lane"].str.lower() != "backlog"]
         over_2_weeks_count = len(open_for_aging[open_for_aging["age_days"] > 14])
         over_month_count = len(open_for_aging[open_for_aging["age_days"] > 30])
 
@@ -252,6 +432,7 @@ with tab_dashboard:
             stale_tickets = filtered[
                 (filtered["state"].isin(open_states)) &
                 (filtered["assigned_to"].isin(team_members)) &
+                (filtered["board_lane"].str.lower() != "backlog") &
                 (filtered["age_days"] > 7) &
                 (
                     (filtered["days_since_comment"].isna()) |
@@ -311,11 +492,12 @@ with tab_dashboard:
             ).dropna()
 
             m_open = m_df[~m_df["state"].isin(complete_states)]
-            older_week = len(m_open[(m_open["age_days"] > 14) & (m_open["age_days"] <= 30)])
-            older_month = len(m_open[m_open["age_days"] > 30])
-            stale_count = len(m_open[
-                (m_open["age_days"] > 7) &
-                ((m_open["days_since_comment"].isna()) | (m_open["days_since_comment"] > 7))
+            m_open_no_backlog = m_open[m_open["board_lane"].str.lower() != "backlog"]
+            older_week = len(m_open_no_backlog[(m_open_no_backlog["age_days"] > 14) & (m_open_no_backlog["age_days"] <= 30)])
+            older_month = len(m_open_no_backlog[m_open_no_backlog["age_days"] > 30])
+            stale_count = len(m_open_no_backlog[
+                (m_open_no_backlog["age_days"] > 7) &
+                ((m_open_no_backlog["days_since_comment"].isna()) | (m_open_no_backlog["days_since_comment"] > 7))
             ])
 
             avg_comments = m_df["comment_count"].mean() if "comment_count" in m_df.columns and m_df["comment_count"].notna().any() else None
