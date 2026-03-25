@@ -169,8 +169,9 @@ with tab_report:
                 closed_groups = {}
                 if not ft_closed.empty:
                     closed_groups["FleetTrack"] = ft_closed[["title", "type"]].to_dict("records")
-                for area, grp in other_closed.groupby("display_area"):
-                    closed_groups[area] = grp[["title", "type"]].to_dict("records")
+                if not other_closed.empty:
+                    for area, grp in other_closed.groupby("display_area"):
+                        closed_groups[area] = grp[["title", "type"]].to_dict("records")
 
                 # Group active: FleetTrack vs other areas
                 ft_active = m_active[m_active["is_fleettrack"]] if not m_active.empty else pd.DataFrame()
@@ -179,8 +180,9 @@ with tab_report:
                 active_groups = {}
                 if not ft_active.empty:
                     active_groups["FleetTrack"] = ft_active[["title", "type"]].to_dict("records")
-                for area, grp in other_active.groupby("display_area"):
-                    active_groups[area] = grp[["title", "type"]].to_dict("records")
+                if not other_active.empty:
+                    for area, grp in other_active.groupby("display_area"):
+                        active_groups[area] = grp[["title", "type"]].to_dict("records")
 
                 report_persons.append({
                     "name": member,
