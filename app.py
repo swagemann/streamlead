@@ -160,6 +160,7 @@ with tab_report:
         # Load git stats for the report period
         report_commits_df = pd.DataFrame()
         report_prs_df = pd.DataFrame()
+        report_builds_df = pd.DataFrame()
         if team_repos_r:
             try:
                 report_commits_df = load_git_commits(
@@ -177,6 +178,13 @@ with tab_report:
                 )
             except Exception:
                 report_prs_df = pd.DataFrame()
+            try:
+                report_builds_df = load_builds(
+                    org_url, report_token, repo_project_r,
+                    report_start.isoformat(),
+                )
+            except Exception:
+                report_builds_df = pd.DataFrame()
 
         report_df = load_data(
             org_url, report_token, project,
@@ -262,6 +270,15 @@ with tab_report:
                     m_prs_completed = len(m_prs_df[m_prs_df["status"] == "Completed"])
                     m_prs_active = len(m_prs_df[m_prs_df["status"] == "Active"])
 
+                m_deployments_total = 0
+                m_deployments_succeeded = 0
+                m_deployments_failed = 0
+                if not report_builds_df.empty:
+                    m_builds_df = report_builds_df[report_builds_df["requested_by"].str.contains(member.split()[0], case=False, na=False)]
+                    m_deployments_total = len(m_builds_df)
+                    m_deployments_succeeded = len(m_builds_df[m_builds_df["result"].str.lower() == "succeeded"])
+                    m_deployments_failed = len(m_builds_df[m_builds_df["result"].str.lower() == "failed"])
+
                 report_persons.append({
                     "name": member,
                     "closed": total_closed,
@@ -271,6 +288,9 @@ with tab_report:
                     "commits": m_commits,
                     "prs_completed": m_prs_completed,
                     "prs_active": m_prs_active,
+                    "deployments_total": m_deployments_total,
+                    "deployments_succeeded": m_deployments_succeeded,
+                    "deployments_failed": m_deployments_failed,
                 })
 
             if report_persons:
@@ -302,7 +322,8 @@ with tab_report:
                     for person in persons:
                         data_block += f"\n### {person['name']}\n"
                         data_block += f"Tickets closed: {person['closed']} | Total comments: {person['comments']}"
-                        data_block += f" | Commits: {person['commits']} | PRs completed: {person['prs_completed']} | PRs active: {person['prs_active']}\n"
+                        data_block += f" | Commits: {person['commits']} | PRs completed: {person['prs_completed']} | PRs active: {person['prs_active']}"
+                        data_block += f" | Deployments: {person['deployments_total']} (succeeded: {person['deployments_succeeded']}, failed: {person['deployments_failed']})\n"
 
                         if person["closed_groups"]:
                             data_block += "\nCOMPLETED WORK:\n"
@@ -331,8 +352,8 @@ FORMAT REQUIREMENTS:
 - Title: "{team_name} — Work Summary" with the date range below it
 - One section per team member with their name as the heading
 - Under each person: a short narrative paragraph (2-4 sentences) summarizing what they accomplished and what they're currently working on. Group related tickets into themes rather than listing every ticket individually. Anything tagged FleetTrack should be described under a "FleetTrack" sub-topic.
-- After the narrative, include a compact stats line: "X tickets closed | Y comments | Z commits | N PRs merged"
-- End with a brief 1-2 sentence team-level summary noting overall throughput, code contributions, and any cross-cutting themes.
+- After the narrative, include a compact stats line: "X tickets closed | Y comments | Z commits | N PRs merged | D deployments (S succeeded, F failed)"
+- End with a brief 1-2 sentence team-level summary noting overall throughput, code contributions, deployment activity, and any cross-cutting themes.
 - Do NOT use bullet points for the narrative — use flowing prose. Keep it scannable but polished.
 - Do NOT fabricate details. Only describe what the ticket titles suggest.
 
