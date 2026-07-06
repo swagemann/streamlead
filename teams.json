@@ -1,13 +1,13 @@
 {
   "Data Modeling": {
     "members": [
-      "Preetham, Kaliki",
-      "Chacko, Jose",
-      "Mirza, Fahad",
-      "Quan, Jevan",
-      "Khadanga, Sambeet",
-      "Shimanek, Jeremy",
-      "Ivas, Dmitry"
+      { "name": "Preetham, Kaliki", "email": "" },
+      { "name": "Chacko, Jose", "email": "" },
+      { "name": "Mirza, Fahad", "email": "" },
+      { "name": "Choo Quan, Jevan", "email": "" },
+      { "name": "Khadanga, Sambeet", "email": "" },
+      { "name": "Shimanek, Jeremy", "email": "" },
+      { "name": "Ivas, Dmitry", "email": "" }
     ]
     , "areas": ["Information Management\\BI Dev", "Information Management\\DBT"]
     , "repo_project": "Data Engineering"

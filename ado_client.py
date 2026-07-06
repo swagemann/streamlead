@@ -31,6 +31,35 @@ FTCASE_PATTERN = re.compile(r"FTCASE#\d+#")
 ADO_SCOPE = "499b84ac-1321-427f-aa17-267ca6975798/.default"
 
 
+def member_matchers(team_members):
+    """Build match sets from (name, email) tuples.
+
+    Returns (emails, name_fragments). Fragments include both "Last, First" and
+    "First Last" forms so git/ADO display-name variants still match.
+    """
+    emails = set()
+    fragments = []
+    for name, email in team_members or []:
+        if email:
+            emails.add(email.lower())
+        if name:
+            fragments.append(name.lower())
+            if "," in name:
+                last, _, first = name.partition(",")
+                fragments.append(f"{first.strip()} {last.strip()}".lower())
+    return emails, fragments
+
+
+def matches_member(emails, fragments, name=None, email=None):
+    """True if an author identity matches a team member by email or name."""
+    if email and email.lower() in emails:
+        return True
+    if name:
+        name_l = name.lower()
+        return any(f in name_l or name_l in f for f in fragments)
+    return False
+
+
 def get_credential():
     """Create an interactive browser credential for Azure AD login."""
     return InteractiveBrowserCredential()
@@ -51,7 +80,7 @@ def fetch_work_items(connection, project, wiql_query):
     if not ids:
         return pd.DataFrame(
             columns=[
-                "id", "state", "assigned_to", "type",
+                "id", "state", "assigned_to", "assigned_email", "type",
                 "created_date", "closed_date",
                 "area_path", "title", "tags", "comment_count",
                 "board_lane",
@@ -68,6 +97,7 @@ def fetch_work_items(connection, project, wiql_query):
         f = wi.fields
         assigned = f.get("System.AssignedTo")
         assigned_name = assigned.get("displayName") if isinstance(assigned, dict) else None
+        assigned_email = assigned.get("uniqueName") if isinstance(assigned, dict) else None
         title = f.get("System.Title", "")
         raw_tags = f.get("System.Tags", "") or ""
 
@@ -86,6 +116,7 @@ def fetch_work_items(connection, project, wiql_query):
                 "id": wi.id,
                 "state": f.get("System.State"),
                 "assigned_to": assigned_name,
+                "assigned_email": assigned_email,
                 "type": f.get("System.WorkItemType"),
                 "created_date": pd.to_datetime(f.get("System.CreatedDate")),
                 "closed_date": pd.to_datetime(f.get("Microsoft.VSTS.Common.ClosedDate")),
@@ -131,24 +162,21 @@ def fetch_git_commits(connection, project, repo_id, team_members, from_date, to_
             top=1000,
         )
         if not commits:
-            return pd.DataFrame(columns=["repo", "commit_id", "author", "date", "message"])
+            return pd.DataFrame(columns=["repo", "commit_id", "author", "author_email", "date", "message"])
 
-        # Git author names may differ from ADO display names, so use
-        # case-insensitive substring matching (e.g. "Jevan" matches
-        # "Jevan Choo Quan" in either direction).
-        member_lower = [m.lower() for m in team_members] if team_members else None
+        # Git author names may differ from ADO display names, so match by
+        # email when configured, otherwise by case-insensitive name substring.
+        emails, fragments = member_matchers(team_members)
         rows = []
         for c in commits:
             author_name = c.author.name if c.author else None
-            if member_lower and author_name:
-                name_l = author_name.lower()
-                if not any(m in name_l or name_l in m for m in member_lower):
-                    continue
-            elif member_lower and not author_name:
+            author_email = c.author.email if c.author else None
+            if team_members and not matches_member(emails, fragments, author_name, author_email):
                 continue
             rows.append({
                 "commit_id": c.commit_id[:8] if c.commit_id else "",
                 "author": author_name or "Unknown",
+                "author_email": author_email or "",
                 "date": pd.to_datetime(c.author.date) if c.author and c.author.date else None,
                 "message": (c.comment or "").split("\n")[0][:120],
             })
@@ -170,9 +198,9 @@ def fetch_pull_requests(connection, project, repo_id, team_members, from_date=No
             top=200,
         )
         if not prs:
-            return pd.DataFrame(columns=["pr_id", "title", "author", "status", "created", "closed", "reviewers"])
+            return pd.DataFrame(columns=["pr_id", "title", "author", "author_email", "status", "created", "closed", "reviewers"])
 
-        member_lower = [m.lower() for m in team_members] if team_members else None
+        emails, fragments = member_matchers(team_members)
         from_dt = pd.to_datetime(from_date, utc=True) if from_date else None
         rows = []
         for pr in prs:
@@ -181,11 +209,8 @@ def fetch_pull_requests(connection, project, repo_id, team_members, from_date=No
                 continue
 
             author_name = pr.created_by.display_name if pr.created_by else None
-            if member_lower and author_name:
-                name_l = author_name.lower()
-                if not any(m in name_l or name_l in m for m in member_lower):
-                    continue
-            elif member_lower and not author_name:
+            author_email = pr.created_by.unique_name if pr.created_by else None
+            if team_members and not matches_member(emails, fragments, author_name, author_email):
                 continue
 
             status_map = {1: "Active", 2: "Abandoned", 3: "Completed"}
@@ -199,6 +224,7 @@ def fetch_pull_requests(connection, project, repo_id, team_members, from_date=No
                 "pr_id": pr.pull_request_id,
                 "title": pr.title or "",
                 "author": author_name or "Unknown",
+                "author_email": author_email or "",
                 "status": status,
                 "created": created,
                 "closed": pd.to_datetime(pr.closed_date, utc=True) if pr.closed_date else None,
@@ -220,7 +246,7 @@ def fetch_builds(connection, project, from_date=None):
             top=200,
         )
         if not builds:
-            return pd.DataFrame(columns=["build_id", "pipeline", "status", "result", "requested_by", "start_time", "finish_time", "branch"])
+            return pd.DataFrame(columns=["build_id", "pipeline", "status", "result", "requested_by", "requested_by_email", "start_time", "finish_time", "branch"])
 
         rows = []
         for b in builds:
@@ -230,6 +256,7 @@ def fetch_builds(connection, project, from_date=None):
                 "status": str(b.status or ""),
                 "result": str(b.result or ""),
                 "requested_by": b.requested_by.display_name if b.requested_by else "",
+                "requested_by_email": b.requested_by.unique_name if b.requested_by else "",
                 "start_time": pd.to_datetime(b.start_time) if b.start_time else None,
                 "finish_time": pd.to_datetime(b.finish_time) if b.finish_time else None,
                 "branch": (b.source_branch or "").replace("refs/heads/", ""),
@@ -241,9 +268,13 @@ def fetch_builds(connection, project, from_date=None):
 
 
 def fetch_last_team_comment_dates(connection, project, work_item_ids, team_members):
-    """Fetch the date of the last comment by a team member for each work item."""
+    """Fetch the date of the last comment by a team member for each work item.
+
+    team_members is a list of (name, email) tuples; email match takes priority.
+    """
     client = connection.clients.get_work_item_tracking_client()
-    team_set = set(team_members)
+    emails = {e.lower() for _, e in team_members if e}
+    names = {n for n, _ in team_members if n}
     result = {}
     for wid in work_item_ids:
         try:
@@ -252,7 +283,8 @@ def fetch_last_team_comment_dates(connection, project, work_item_ids, team_membe
             if comments.comments:
                 for c in comments.comments:
                     author_name = c.created_by.display_name if c.created_by else None
-                    if author_name in team_set:
+                    author_email = c.created_by.unique_name if c.created_by else None
+                    if (author_email and author_email.lower() in emails) or author_name in names:
                         cdate = pd.to_datetime(c.created_date)
                         if last_date is None or cdate > last_date:
                             last_date = cdate

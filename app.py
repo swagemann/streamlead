@@ -20,6 +20,34 @@ if "credential" not in st.session_state:
 teams = load_teams()
 team_names = list(teams.keys())
 
+
+def members_key(members):
+    """Hashable (name, email) tuples for cache keys and client functions."""
+    return tuple((m["name"], m["email"]) for m in members)
+
+
+def map_members(df, members):
+    """Map each work-item row to its canonical member name.
+
+    Matches on email (uniqueName) when configured, falling back to the ADO
+    display name, so a display-name change can't drop someone from the report.
+    """
+    email_map = {m["email"]: m["name"] for m in members if m["email"]}
+    name_map = {m["name"]: m["name"] for m in members}
+    by_email = df["assigned_email"].fillna("").str.lower().map(email_map)
+    return by_email.fillna(df["assigned_to"].map(name_map))
+
+
+def person_mask(df, name_col, email_col, name, email):
+    """Rows authored by this person: exact email match or first-name substring."""
+    mask = pd.Series(False, index=df.index)
+    if email and email_col in df.columns:
+        mask |= df[email_col].fillna("").str.lower() == email
+    first = name.split(",")[-1].strip().split()[0] if name and name.strip() else ""
+    if first:
+        mask |= df[name_col].str.contains(first, case=False, na=False, regex=False)
+    return mask
+
 # --- Sidebar: Config ---
 with st.sidebar:
     st.header("Configuration")
@@ -63,14 +91,16 @@ def load_data(org_url, token, project, start_date, end_date, area_paths, members
         )
         clauses.append(f"({area_clause})")
     if members:
+        # members are (name, email) tuples; WIQL accepts either identity form,
+        # but email survives display-name changes.
         member_clause = " OR ".join(
-            f"[System.AssignedTo] = '{m}'" for m in members
+            f"[System.AssignedTo] = '{email or name}'" for name, email in members
         )
         clauses.append(f"({member_clause})")
 
     if not clauses:
         return pd.DataFrame(columns=[
-            "id", "state", "assigned_to", "type",
+            "id", "state", "assigned_to", "assigned_email", "type",
             "created_date", "closed_date",
             "area_path", "title", "tags", "comment_count",
             "board_lane",
@@ -109,7 +139,7 @@ def load_git_commits(org_url, token, project, repo_names, members, start_date, e
         if not df.empty:
             df["repo"] = name
             all_dfs.append(df)
-    return pd.concat(all_dfs, ignore_index=True) if all_dfs else pd.DataFrame(columns=["repo", "commit_id", "author", "date", "message"])
+    return pd.concat(all_dfs, ignore_index=True) if all_dfs else pd.DataFrame(columns=["repo", "commit_id", "author", "author_email", "date", "message"])
 
 
 @st.cache_data(ttl=300)
@@ -124,7 +154,7 @@ def load_pull_requests(org_url, token, project, repo_names, members, start_date)
         if not df.empty:
             df["repo"] = name
             all_dfs.append(df)
-    return pd.concat(all_dfs, ignore_index=True) if all_dfs else pd.DataFrame(columns=["repo", "pr_id", "title", "author", "status", "created", "closed", "reviewers"])
+    return pd.concat(all_dfs, ignore_index=True) if all_dfs else pd.DataFrame(columns=["repo", "pr_id", "title", "author", "author_email", "status", "created", "closed", "reviewers"])
 
 
 @st.cache_data(ttl=300)
@@ -150,6 +180,7 @@ with tab_report:
         report_token = st.session_state.credential.get_token(ADO_SCOPE).token
         team_config_r = teams[selected_team]
         team_members_r = team_config_r.get("members", [])
+        team_members_key_r = members_key(team_members_r)
         team_areas_r = team_config_r.get("areas", [])
 
         report_end = pd.Timestamp.now(tz="UTC")
@@ -165,7 +196,7 @@ with tab_report:
             try:
                 report_commits_df = load_git_commits(
                     org_url, report_token, repo_project_r,
-                    tuple(team_repos_r), tuple(team_members_r),
+                    tuple(team_repos_r), team_members_key_r,
                     str(report_start.date()), str(report_end.date()),
                 )
             except Exception:
@@ -173,7 +204,7 @@ with tab_report:
             try:
                 report_prs_df = load_pull_requests(
                     org_url, report_token, repo_project_r,
-                    tuple(team_repos_r), tuple(team_members_r),
+                    tuple(team_repos_r), team_members_key_r,
                     str(report_start.date()),
                 )
             except Exception:
@@ -189,7 +220,7 @@ with tab_report:
         report_df = load_data(
             org_url, report_token, project,
             str(report_start.date()), str(report_end.date()),
-            tuple(team_areas_r), tuple(team_members_r)
+            tuple(team_areas_r), team_members_key_r
         )
 
         if not report_df.empty:
@@ -201,19 +232,20 @@ with tab_report:
                 lambda p: p.split("\\")[-1] if p else "Unknown"
             )
             report_df["is_fleettrack"] = report_df["tags_list"].apply(lambda t: "Fleet Track" in t)
+            report_df["member"] = map_members(report_df, team_members_r)
 
             closed_states = ["Closed", "Resolved", "Done", "Complete"]
             closed_df = report_df[
                 (report_df["state"].isin(closed_states)) &
                 (report_df["closed_date"] >= report_start) &
-                (report_df["assigned_to"].isin(team_members_r))
+                (report_df["member"].notna())
             ]
 
             # Also gather active/in-progress tickets for context
             active_states = ["Approved", "Active", "In Progress"]
             active_df = report_df[
                 (report_df["state"].isin(active_states)) &
-                (report_df["assigned_to"].isin(team_members_r))
+                (report_df["member"].notna())
             ]
 
             period_label = f"{report_start.strftime('%B %d')} – {report_end.strftime('%B %d, %Y')}"
@@ -226,9 +258,10 @@ with tab_report:
 
             # Build per-person report data
             report_persons = []
-            for member in sorted(team_members_r):
-                m_closed = closed_df[closed_df["assigned_to"] == member]
-                m_active = active_df[active_df["assigned_to"] == member]
+            for member in sorted(team_members_r, key=lambda m: m["name"]):
+                m_name, m_email = member["name"], member["email"]
+                m_closed = closed_df[closed_df["member"] == m_name]
+                m_active = active_df[active_df["member"] == m_name]
 
                 if m_closed.empty and m_active.empty:
                     continue
@@ -263,10 +296,10 @@ with tab_report:
                 m_prs_completed = 0
                 m_prs_active = 0
                 if not report_commits_df.empty:
-                    m_commits_df = report_commits_df[report_commits_df["author"].str.contains(member.split()[0], case=False, na=False)]
+                    m_commits_df = report_commits_df[person_mask(report_commits_df, "author", "author_email", m_name, m_email)]
                     m_commits = len(m_commits_df)
                 if not report_prs_df.empty:
-                    m_prs_df = report_prs_df[report_prs_df["author"].str.contains(member.split()[0], case=False, na=False)]
+                    m_prs_df = report_prs_df[person_mask(report_prs_df, "author", "author_email", m_name, m_email)]
                     m_prs_completed = len(m_prs_df[m_prs_df["status"] == "Completed"])
                     m_prs_active = len(m_prs_df[m_prs_df["status"] == "Active"])
 
@@ -274,13 +307,13 @@ with tab_report:
                 m_deployments_succeeded = 0
                 m_deployments_failed = 0
                 if not report_builds_df.empty:
-                    m_builds_df = report_builds_df[report_builds_df["requested_by"].str.contains(member.split()[0], case=False, na=False)]
+                    m_builds_df = report_builds_df[person_mask(report_builds_df, "requested_by", "requested_by_email", m_name, m_email)]
                     m_deployments_total = len(m_builds_df)
                     m_deployments_succeeded = len(m_builds_df[m_builds_df["result"].str.lower() == "succeeded"])
                     m_deployments_failed = len(m_builds_df[m_builds_df["result"].str.lower() == "failed"])
 
                 report_persons.append({
-                    "name": member,
+                    "name": m_name,
                     "closed": total_closed,
                     "comments": total_comments,
                     "closed_groups": closed_groups,
@@ -390,6 +423,7 @@ with tab_git:
         git_token = st.session_state.credential.get_token(ADO_SCOPE).token
         git_team_config = teams[selected_team]
         git_members = git_team_config.get("members", [])
+        git_members_key = members_key(git_members)
         git_repos = git_team_config.get("repos", [])
         git_project = git_team_config.get("repo_project", project)
 
@@ -407,7 +441,7 @@ with tab_git:
                 try:
                     commits_df = load_git_commits(
                         org_url, git_token, git_project,
-                        tuple(git_repos), tuple(git_members),
+                        tuple(git_repos), git_members_key,
                         git_start, git_end,
                     )
                     if not commits_df.empty:
@@ -441,7 +475,7 @@ with tab_git:
                 try:
                     prs_df = load_pull_requests(
                         org_url, git_token, git_project,
-                        tuple(git_repos), tuple(git_members),
+                        tuple(git_repos), git_members_key,
                         git_start,
                     )
                     if not prs_df.empty:
@@ -502,12 +536,13 @@ with tab_dashboard:
 
         team_config = teams[selected_team]
         team_members = team_config.get("members", [])
+        team_members_key = members_key(team_members)
         team_areas = team_config.get("areas", [])
 
         df = load_data(
             org_url, token, project,
             str(date_range[0]), str(date_range[1]),
-            tuple(team_areas), tuple(team_members)
+            tuple(team_areas), team_members_key
         )
 
         # Derive tags_list
@@ -515,12 +550,24 @@ with tab_dashboard:
             lambda t: [x.strip() for x in t.split(";") if x.strip()] if t else []
         )
 
-        # Build team lookup
-        member_to_team = {}
+        # Build team lookup (email match first, display name as fallback)
+        email_to_team, name_to_team = {}, {}
         for tn, tc in teams.items():
             for m in tc.get("members", []):
-                member_to_team[m] = tn
-        df["team"] = df["assigned_to"].map(member_to_team).fillna("Unassigned")
+                if m["email"]:
+                    email_to_team[m["email"]] = tn
+                name_to_team[m["name"]] = tn
+        df["team"] = (
+            df["assigned_email"].fillna("").str.lower().map(email_to_team)
+            .fillna(df["assigned_to"].map(name_to_team))
+            .fillna("Unassigned")
+        )
+
+        # Canonical member name for each row of the selected team
+        if team_members:
+            df["member"] = map_members(df, team_members)
+        else:
+            df["member"] = df["assigned_to"]
 
         # Compute ticket age
         now = pd.Timestamp.now(tz="UTC")
@@ -541,14 +588,14 @@ with tab_dashboard:
 
         # Fetch last team comment dates for open tickets assigned to team
         open_mask = ~df["state"].isin(["Closed", "Resolved", "Done", "Complete"])
-        team_mask = df["assigned_to"].isin(team_members)
+        team_mask = df["member"].notna()
         open_team_ids = df.loc[open_mask & team_mask, "id"].tolist()
 
         if open_team_ids:
             comment_dates = load_comment_dates(
                 org_url, token, project,
                 tuple(sorted(open_team_ids)),
-                tuple(sorted(team_members))
+                tuple(sorted(team_members_key))
             )
             df["last_team_comment"] = df["id"].map(comment_dates)
         else:
@@ -582,7 +629,7 @@ with tab_dashboard:
         over_month_count = len(open_for_aging[open_for_aging["age_days"] > 30])
 
         # Stale KPI (same logic as stale tickets table)
-        open_for_stale = open_for_aging[open_for_aging["assigned_to"].isin(team_members)]
+        open_for_stale = open_for_aging[open_for_aging["member"].notna()]
         stale_count_kpi = len(open_for_stale[
             (open_for_stale["age_days"] > 7) &
             ((open_for_stale["days_since_comment"].isna()) | (open_for_stale["days_since_comment"] > 7))
@@ -591,7 +638,7 @@ with tab_dashboard:
         # Wrong area count
         wrong_area_count = len(df[
             (~df["in_designated_area"]) &
-            (df["assigned_to"].isin(team_members)) &
+            (df["member"].notna()) &
             (df["state"].isin(["New", "Created", "Evaluate", "Approved", "Active", "In Progress"]))
         ])
 
@@ -651,7 +698,7 @@ with tab_dashboard:
             open_states = [s for s in filtered["state"].unique() if s not in ["Closed", "Resolved", "Done", "Complete"]]
             stale_tickets = filtered[
                 (filtered["state"].isin(open_states)) &
-                (filtered["assigned_to"].isin(team_members)) &
+                (filtered["member"].notna()) &
                 (filtered["board_lane"].str.lower() != "backlog") &
                 (filtered["age_days"] > 7) &
                 (
@@ -692,10 +739,7 @@ with tab_dashboard:
         st.divider()
         st.subheader("Team Summary")
 
-        if team_members:
-            member_names = sorted(set(team_members) & set(filtered["assigned_to"].dropna().unique()))
-        else:
-            member_names = sorted(filtered["assigned_to"].dropna().unique())
+        member_names = sorted(filtered["member"].dropna().unique())
         team_rows = []
 
         new_states = ["New", "Created"]
@@ -705,7 +749,7 @@ with tab_dashboard:
         blocked_states = ["Blocked"]
 
         for m in member_names:
-            m_df = filtered[filtered["assigned_to"] == m]
+            m_df = filtered[filtered["member"] == m]
             m_closed = m_df[m_df["state"].isin(complete_states)]
             m_days = m_closed.apply(
                 lambda r: (r["closed_date"] - r["created_date"]).days if pd.notna(r["closed_date"]) else None, axis=1
@@ -766,19 +810,16 @@ with tab_dashboard:
         st.divider()
         st.subheader("Team Ticket Details")
 
-        if team_members:
-            all_members = sorted(set(team_members) & set(filtered["assigned_to"].dropna().unique()))
-        else:
-            all_members = sorted(filtered["assigned_to"].dropna().unique())
+        all_members = sorted(filtered["member"].dropna().unique())
         selected_member = st.selectbox("Select Team Member", ["All"] + list(all_members))
 
         if selected_member == "All":
             if team_members:
-                detail_df = filtered[filtered["assigned_to"].isin(team_members)].copy()
+                detail_df = filtered[filtered["member"].notna()].copy()
             else:
                 detail_df = filtered.copy()
         else:
-            detail_df = filtered[filtered["assigned_to"] == selected_member].copy()
+            detail_df = filtered[filtered["member"] == selected_member].copy()
 
         state_order = ["New", "Created", "Evaluate", "Approved", "Active", "In Progress", "Blocked"]
 
@@ -820,7 +861,7 @@ with tab_dashboard:
         active_states = ["New", "Created", "Evaluate", "Approved", "Active", "In Progress"]
         outside_df = df[
             (~df["in_designated_area"]) &
-            (df["assigned_to"].isin(team_members)) &
+            (df["member"].notna()) &
             (df["state"].isin(active_states))
         ].copy()
 
