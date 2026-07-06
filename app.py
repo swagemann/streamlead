@@ -32,7 +32,7 @@ def map_members(df, members):
     Matches on email (uniqueName) when configured, falling back to the ADO
     display name, so a display-name change can't drop someone from the report.
     """
-    email_map = {m["email"]: m["name"] for m in members if m["email"]}
+    email_map = {m["email"].lower(): m["name"] for m in members if m["email"]}
     name_map = {m["name"]: m["name"] for m in members}
     by_email = df["assigned_email"].fillna("").str.lower().map(email_map)
     return by_email.fillna(df["assigned_to"].map(name_map))
@@ -115,6 +115,8 @@ def load_data(org_url, token, project, start_date, end_date, area_paths, members
             ([System.CreatedDate] >= '{start_date}' AND [System.CreatedDate] <= '{end_date}')
             OR
             ([Microsoft.VSTS.Common.ClosedDate] >= '{start_date}' AND [Microsoft.VSTS.Common.ClosedDate] <= '{end_date}')
+            OR
+            ([System.ChangedDate] >= '{start_date}' AND [System.ChangedDate] <= '{end_date}')
         )
         ORDER BY [System.CreatedDate] DESC
     """
@@ -184,7 +186,8 @@ with tab_report:
         team_areas_r = team_config_r.get("areas", [])
 
         report_end = pd.Timestamp.now(tz="UTC")
-        report_start = report_end - pd.Timedelta(weeks=1)
+        # Normalize to midnight so the full first day (e.g. last Monday) is included
+        report_start = (report_end - pd.Timedelta(weeks=1)).normalize()
         team_repos_r = team_config_r.get("repos", [])
         repo_project_r = team_config_r.get("repo_project", project)
 
@@ -241,8 +244,10 @@ with tab_report:
                 (report_df["member"].notna())
             ]
 
-            # Also gather active/in-progress tickets for context
-            active_states = ["Approved", "Active", "In Progress"]
+            # Also gather open tickets worked during the period. The WIQL query
+            # already limits results to items created/closed/changed in the
+            # window, so any non-closed state here represents recent activity.
+            active_states = ["New", "Created", "Evaluate", "Approved", "Active", "In Progress", "Blocked"]
             active_df = report_df[
                 (report_df["state"].isin(active_states)) &
                 (report_df["member"].notna())
@@ -412,9 +417,9 @@ Write the report now."""
                     mime="text/plain",
                 )
             else:
-                st.info("No closed or active tickets found for team members in the last 3 weeks.")
+                st.info("No closed or active tickets found for team members in the past week.")
         else:
-            st.info("No work items found for the last 3 weeks.")
+            st.info("No work items found for the past week.")
     else:
         st.info("Sign in with your Microsoft account and select a team to get started.")
 
@@ -555,7 +560,7 @@ with tab_dashboard:
         for tn, tc in teams.items():
             for m in tc.get("members", []):
                 if m["email"]:
-                    email_to_team[m["email"]] = tn
+                    email_to_team[m["email"].lower()] = tn
                 name_to_team[m["name"]] = tn
         df["team"] = (
             df["assigned_email"].fillna("").str.lower().map(email_to_team)
