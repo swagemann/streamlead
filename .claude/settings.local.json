@@ -10,7 +10,9 @@
       "Bash(pip install azure-identity)",
       "Bash(unzip -l /c/streamlead/streamlead_zip.zip)",
       "Bash(wc -l *.py *.json)",
-      "Bash(python -m py_compile app.py)"
+      "Bash(python -m py_compile app.py)",
+      "PowerShell(python -m py_compile app.py ado_client.py)",
+      "PowerShell(if \\($?\\) { \"compile OK\" })"
     ]
   }
 }

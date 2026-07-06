@@ -5,7 +5,8 @@ import pandas as pd
 import os
 from ado_client import (
     get_credential, get_ado_connection, fetch_work_items,
-    fetch_last_team_comment_dates, fetch_repos, fetch_git_commits,
+    fetch_last_team_comment_dates, fetch_comment_counts_by_author,
+    fetch_repos, fetch_git_commits,
     fetch_pull_requests, fetch_builds, ADO_SCOPE,
 )
 from teams import load_teams
@@ -127,6 +128,12 @@ def load_data(org_url, token, project, start_date, end_date, area_paths, members
 def load_comment_dates(org_url, token, project, work_item_ids, team_members):
     conn = get_ado_connection(org_url, token)
     return fetch_last_team_comment_dates(conn, project, work_item_ids, team_members)
+
+
+@st.cache_data(ttl=300)
+def load_comment_counts(org_url, token, project, work_item_ids, team_members, start_date, end_date):
+    conn = get_ado_connection(org_url, token)
+    return fetch_comment_counts_by_author(conn, project, work_item_ids, team_members, start_date, end_date)
 
 
 @st.cache_data(ttl=300)
@@ -253,6 +260,18 @@ with tab_report:
                 (report_df["member"].notna())
             ]
 
+            # Comments written by each member during the period, on any fetched
+            # ticket regardless of its state or assignee
+            try:
+                report_comment_counts = load_comment_counts(
+                    org_url, report_token, project,
+                    tuple(sorted(int(i) for i in report_df["id"])),
+                    tuple(sorted(team_members_key_r)),
+                    str(report_start.date()), str(report_end.date()),
+                )
+            except Exception:
+                report_comment_counts = {}
+
             period_label = f"{report_start.strftime('%B %d')} – {report_end.strftime('%B %d, %Y')}"
             st.markdown(f"### {selected_team} — Summary Report Generator")
             st.caption(period_label)
@@ -267,12 +286,12 @@ with tab_report:
                 m_name, m_email = member["name"], member["email"]
                 m_closed = closed_df[closed_df["member"] == m_name]
                 m_active = active_df[active_df["member"] == m_name]
+                total_comments = int(report_comment_counts.get(m_name, 0))
 
-                if m_closed.empty and m_active.empty:
+                if m_closed.empty and m_active.empty and total_comments == 0:
                     continue
 
                 total_closed = len(m_closed)
-                total_comments = int(m_closed["comment_count"].sum()) if not m_closed.empty else 0
 
                 # Group closed: FleetTrack vs other areas
                 ft_closed = m_closed[m_closed["is_fleettrack"]] if not m_closed.empty else pd.DataFrame()
@@ -338,7 +357,7 @@ with tab_report:
                     st.markdown(f"#### {person['name']}")
                     col_a, col_b = st.columns(2)
                     col_a.metric("Tickets Closed", person["closed"])
-                    col_b.metric("Total Comments", person["comments"])
+                    col_b.metric("Comments Written", person["comments"])
 
                     if person["closed_groups"]:
                         st.markdown("**Completed**")
@@ -359,7 +378,7 @@ with tab_report:
                     data_block = ""
                     for person in persons:
                         data_block += f"\n### {person['name']}\n"
-                        data_block += f"Tickets closed: {person['closed']} | Total comments: {person['comments']}"
+                        data_block += f"Tickets closed: {person['closed']} | Comments written: {person['comments']}"
                         data_block += f" | Commits: {person['commits']} | PRs completed: {person['prs_completed']} | PRs active: {person['prs_active']}"
                         data_block += f" | Deployments: {person['deployments_total']} (succeeded: {person['deployments_succeeded']}, failed: {person['deployments_failed']})\n"
 
@@ -390,7 +409,7 @@ FORMAT REQUIREMENTS:
 - Title: "{team_name} — Work Summary" with the date range below it
 - One section per team member with their name as the heading
 - Under each person: a short narrative paragraph (2-4 sentences) summarizing what they accomplished and what they're currently working on. Group related tickets into themes rather than listing every ticket individually. Anything tagged FleetTrack should be described under a "FleetTrack" sub-topic.
-- After the narrative, include a compact stats line: "X tickets closed | Y comments | Z commits | N PRs merged | D deployments (S succeeded, F failed)"
+- After the narrative, include a compact stats line: "X tickets closed | Y comments written | Z commits | N PRs merged | D deployments (S succeeded, F failed)"
 - End with a brief 1-2 sentence team-level summary noting overall throughput, code contributions, deployment activity, and any cross-cutting themes.
 - Do NOT use bullet points for the narrative — use flowing prose. Keep it scannable but polished.
 - Do NOT fabricate details. Only describe what the ticket titles suggest.

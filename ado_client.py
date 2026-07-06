@@ -267,6 +267,38 @@ def fetch_builds(connection, project, from_date=None):
         raise
 
 
+def fetch_comment_counts_by_author(connection, project, work_item_ids, team_members, start_date, end_date):
+    """Count comments written by each team member across work items in a date window.
+
+    team_members is a list of (name, email) tuples; email match takes priority.
+    start_date/end_date are inclusive date strings (comments on the end date count).
+    Returns {canonical member name: comment count}.
+    """
+    client = connection.clients.get_work_item_tracking_client()
+    email_to_name = {e.lower(): n for n, e in team_members if e}
+    names = {n for n, _ in team_members if n}
+    start = pd.to_datetime(start_date, utc=True)
+    end = pd.to_datetime(end_date, utc=True) + pd.Timedelta(days=1)
+    counts = {}
+    for wid in work_item_ids:
+        try:
+            comments = client.get_comments(project, wid)
+        except Exception:
+            continue
+        for c in comments.comments or []:
+            author_name = c.created_by.display_name if c.created_by else None
+            author_email = c.created_by.unique_name if c.created_by else None
+            member = email_to_name.get(author_email.lower()) if author_email else None
+            if member is None and author_name in names:
+                member = author_name
+            if member is None:
+                continue
+            cdate = pd.to_datetime(c.created_date, utc=True)
+            if start <= cdate < end:
+                counts[member] = counts.get(member, 0) + 1
+    return counts
+
+
 def fetch_last_team_comment_dates(connection, project, work_item_ids, team_members):
     """Fetch the date of the last comment by a team member for each work item.
 
