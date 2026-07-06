@@ -153,7 +153,7 @@ with tab_report:
         team_areas_r = team_config_r.get("areas", [])
 
         report_end = pd.Timestamp.now(tz="UTC")
-        report_start = report_end - pd.Timedelta(weeks=3)
+        report_start = report_end - pd.Timedelta(weeks=1)
         team_repos_r = team_config_r.get("repos", [])
         repo_project_r = team_config_r.get("repo_project", project)
 

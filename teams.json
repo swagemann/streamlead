@@ -1,8 +1,16 @@
 {
   "Data Modeling": {
-    "members": [],
-    "areas": ["Information Management\\BI Dev", "Information Management\\dbt"],
-    "repo_project": "Data Engineering",
-    "repos": []
+    "members": [
+      "Preetham, Kaliki",
+      "Chacko, Jose",
+      "Mirza, Fahad",
+      "Quan, Jevan",
+      "Khadanga, Sambeet",
+      "Shimanek, Jeremy",
+      "Ivas, Dmitry"
+    ]
+    , "areas": ["Information Management\\BI Dev", "Information Management\\DBT"]
+    , "repo_project": "Data Engineering"
+    , "repos": ["dbt_enterprise_data_models"]
   }
 }
