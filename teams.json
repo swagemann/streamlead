@@ -1,15 +1,15 @@
 {
   "Data Modeling": {
     "members": [
-      { "name": "Preetham, Kaliki", "email": "" },
-      { "name": "Chacko, Jose", "email": "" },
-      { "name": "Mirza, Fahad", "email": "" },
-      { "name": "Choo Quan, Jevan", "email": "" },
-      { "name": "Khadanga, Sambeet", "email": "" },
-      { "name": "Shimanek, Jeremy", "email": "" },
-      { "name": "Ivas, Dmitry", "email": "" }
+      { "name": "Preetham, Kaliki", "email": "Kaliki.Preetham@holman.com" },
+      { "name": "Chacko, Jose", "email": "Jose.Chacko@holman.com" },
+      { "name": "Mirza, Fahad", "email": "Fahad.Mirza@holman.com" },
+      { "name": "Choo Quan, Jevan", "email": "Jevan.Quan@holman.com" },
+      { "name": "Khadanga, Sambeet", "email": "Sambeet.Khadanga@holman.com" },
+      { "name": "Shimanek, Jeremy", "email": "Jeremy.Shimanek@holman.com" },
+      { "name": "Ivas, Dmitry", "email": "Dmitry.Ivas@holman.com" }
     ]
-    , "areas": ["Information Management\\BI Dev", "Information Management\\DBT"]
+    , "areas": ["Information Management\\BI Dev", "Information Management\\DBT"]  
     , "repo_project": "Data Engineering"
     , "repos": ["dbt_enterprise_data_models"]
   }
